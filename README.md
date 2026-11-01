@@ -73,8 +73,8 @@ Global Flags:
 | 场景示例                             | 执行命令                             |
 | ------------------------------------ | ------------------------------------ |
 | 完全脱离数据库干运行                 | `bot run --from-api`                 |
-| 使用多线程渲染**（注意内存占用！）** | `bot run --browser-workers [线程数]` |
-| 连接 MySQL 并**实际写入**数据库      | `bot run --dsn [DSN]`                |
+| 使用多线程渲染 **（注意内存占用！）** | `bot run --browser-workers [线程数]` |
+| 连接 MySQL 并 **实际写入** 数据库      | `bot run --dsn [DSN]`                |
 
 #### --browser-workers
 
