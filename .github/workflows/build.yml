@@ -1,0 +1,115 @@
+name: Build & Rolling Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go.mod/go.sum tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
+  # 版本号规则对齐 AstraSchedule/desktop：YYYYMM.D.N（UTC 年月.无前导零日.run_number）。
+  # 只在独立 job 算一次、经 output 共享——各任务自取日期会在跨午夜时分裂。
+  version:
+    if: ${{ github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'docs') }}
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      ver: ${{ steps.compute.outputs.ver }}
+    steps:
+      - id: compute
+        name: Compute rolling version
+        run: |
+          ym=$(date -u +%Y%m)
+          dd=$(date -u +%-d)
+          echo "ver=${ym}.${dd}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  build:
+    if: ${{ github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'docs') }}
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        shell: bash
+        env:
+          VER: ${{ needs.version.outputs.ver }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          go build -trimpath -ldflags "-s -w -X main.botVersion=${VER}" \
+            -o "dist/bot-${GOOS}-${GOARCH}${ext}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  publish_release:
+    if: ${{ github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'docs') }}
+    needs: [build, version]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bot-*
+          merge-multiple: true
+          path: dist
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 本 job 无 checkout，仓库上下文必须显式给出（desktop 同款教训）
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ver='${{ needs.version.outputs.ver }}'
+          tag="v$ver"
+          shopt -s nullglob
+          files=(dist/bot-*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::没有可发布的产物"
+            exit 1
+          fi
+          printf 'publish: %s\n' "${files[@]}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # 失败重跑时 release 可能已存在：--clobber 覆盖上传保持幂等
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            # --target 锁定触发本次构建的提交，防 tag 漂到重跑期间的新提交
+            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "$tag" --notes "Rolling build $ver"
+          fi

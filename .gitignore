@@ -39,3 +39,4 @@ go.work.sum
 /logs.txt
 /*.log
 bot.exe
+/dist/

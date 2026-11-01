@@ -29,6 +29,9 @@ import (
 // verbose 由 -v 持久标志设置，供各命令判断是否输出 debug 细节。
 var verbose bool
 
+// botVersion 由发版 CI 注入（-ldflags "-X main.botVersion=..."），本地构建为 dev。
+var botVersion = "dev"
+
 func main() {
 	root := &cobra.Command{
 		Use:   "bot",
@@ -37,6 +40,7 @@ func main() {
 			setupLog(verbose)
 		},
 	}
+	root.Version = botVersion
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "输出 debug 级日志")
 	root.PersistentFlags().StringVar(&cfgLogFile, "log-file", "", "日志写入指定文件（JSON 行格式）；留空则输出到 stderr")
 	root.AddCommand(checkCmd())
