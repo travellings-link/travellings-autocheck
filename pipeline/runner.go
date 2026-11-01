@@ -31,7 +31,7 @@ type Verdict struct {
 	Stage    check.Stage
 	Evidence string
 	// InfraErr 非空表示失败出在**我们自己的工具链**（CDP 挂掉、浏览器崩溃）。
-	// 按 PLAN §5 约定：这类结果不得写库，否则等于用自己的故障判站点死刑。
+	// 既定约定：这类结果不得写库，否则等于用自己的故障判站点死刑。
 	InfraErr string
 	// NavTimeout 非空表示**站点**在导航预算内没加载完。
 	// 它同理不写库（预算不足以证明站点坏了），但与 InfraErr 分开计数——
@@ -39,7 +39,7 @@ type Verdict struct {
 	NavTimeout string
 }
 
-// Options 是 run 管线参数（对齐 PLAN §2a 命令面）。
+// Options 是 run 管线参数（与 addRunFlags 注册的命令面一一对应）。
 type Options struct {
 	// HTTPWorkers 是 Fetcher 阶段的并发数。
 	HTTPWorkers int

@@ -711,7 +711,7 @@ func writeJSON(vs []pipeline.Verdict) error {
 
 // verdicts2updates 把判定转成待写库更新。
 // 关键：InfraErr 非空的条目**跳过**——那是我们自己的工具链故障，
-// 写进去等于用自己的失败去改站点的线上状态（PLAN §5 约定）。
+// 写进去等于用自己的失败去改站点的线上状态（既定约定）。
 func verdicts2updates(vs []pipeline.Verdict) []db.VerdictUpdate {
 	out := make([]db.VerdictUpdate, 0, len(vs))
 	for _, v := range vs {

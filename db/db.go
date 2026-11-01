@@ -42,7 +42,7 @@ type Web struct {
 // TableName 固定 webs 表（gorm 默认会把 Web 复数成 webs，但显式写出防歧义）。
 func (Web) TableName() string { return "webs" }
 
-// ListSites 取待巡清单：按 30 天豁免过滤（PLAN §6 契约）。
+// ListSites 取待巡清单：按 30 天豁免过滤（线上口径契约）。
 // status 不过滤（全量入队），对齐原项目 axios 阶段取数语义。
 func ListSites(db *gorm.DB, now time.Time) ([]Web, error) {
 	cutoff := now.Add(-30 * 24 * time.Hour)
@@ -85,7 +85,7 @@ type VerdictUpdate struct {
 	Reason string
 }
 
-// WriteVerdicts 批量写回 webs，只动 status/failedReason/lastManualCheck（PLAN §6：
+// WriteVerdicts 批量写回 webs，只动 status/failedReason/lastManualCheck（契约：
 // member 元数据 name/link/tag 只读；不 INSERT/DELETE）。WAIT 不变量写进 SQL——
 // status='WAIT' 且新值<>RUN 时保持 WAIT（原 sqlModel.ts beforeUpdate 语义）。
 // 单事务，幂等（按 id 覆盖）。
