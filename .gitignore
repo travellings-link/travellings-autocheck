@@ -31,3 +31,11 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# 本项目专属：本地调试产物，绝不入库
+# /tmp 里是 Obscura、Chrome profile、旧 node 参考实现、各类探针脚本（330MB+）
+/tmp/
+/.idea/
+/logs.txt
+/*.log
+bot.exe
