@@ -73,8 +73,8 @@ Global Flags:
 | 场景示例                             | 执行命令                             |
 | ------------------------------------ | ------------------------------------ |
 | 完全脱离数据库干运行                 | `bot run --from-api`                 |
-| 使用多线程渲染**（注意内存占用！）** | `bot run --browser-workers [线程数]` |
-| 连接 MySQL 并**实际写入**数据库      | `bot run --dsn [DSN]`                |
+| 使用多线程渲染 **（注意内存占用！）** | `bot run --browser-workers [线程数]` |
+| 连接 MySQL 并 **实际写入** 数据库      | `bot run --dsn [DSN]`                |
 
 #### --browser-workers
 
@@ -241,7 +241,7 @@ bot run --from-api --dry-run          # 完全不碰数据库
 
 ## 定时
 
-渲染后端做成独立 unit，生命周期绑在巡查单元上：巡查起它起，巡查停它停。三个文件都在 `/etc/systemd/system/`。
+三个文件都在 `/etc/systemd/system/`。
 
 `obscura.service`：
 
@@ -251,23 +251,25 @@ Description=Obscura CDP server
 PartOf=autocheck.service
 
 [Service]
+# --workers 与 --worker-max-rss 按需调整
 ExecStart=/usr/local/bin/obscura serve --workers 8 --worker-max-rss 1024 --quiet
-MemoryMax=1G
+MemoryMax=1G  # 按需调整
 ```
 
 `autocheck.service`：
 
 ```ini
 [Unit]
-Description=Travellings autocheck (one pass)
+Description=Travellings autocheck
 Requires=obscura.service
 After=obscura.service
 
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/autocheck.env
-ExecStart=/usr/local/bin/bot run --write --driver mysql
-MemoryMax=1G
+# --log-file 按需调整
+ExecStart=/usr/local/bin/bot run --write --driver mysql --log-file "/root/travellings-autocheck.log"
+MemoryMax=1G  # 按需调整
 
 [Install]
 WantedBy=multi-user.target
@@ -277,10 +279,10 @@ WantedBy=multi-user.target
 
 ```ini
 [Unit]
-Description=Daily 04:00 Travellings autocheck
+Description=Daily Travellings autocheck
 
 [Timer]
-OnCalendar=*-*-* 04:00:00
+OnCalendar=*-*-* 04:00:00  # 按需调整
 Persistent=true
 
 [Install]
@@ -291,7 +293,7 @@ WantedBy=timers.target
 
 ```ini
 DB_DRIVER=mysql
-DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname
+DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname  # 按需调整
 ```
 
 ```sh
@@ -302,7 +304,7 @@ systemctl list-timers autocheck.timer
 journalctl -u autocheck.service -u obscura.service
 ```
 
-巡查连不上 `--cdp-url` 会静默回退本地 Chrome，所以 Obscura 必须先于巡查就绪：`Requires=` 拉起它、`After=` 排好顺序、`PartOf=` 让它在巡查单元停止时一并停掉（`Type=oneshot` 跑完即停，不会跨轮驻留）。只 enable timer——连 `autocheck.service` 一起 enable 会开机加定时双触发。
+巡查连不上 `--cdp-url` 会静默回退本地 Chrome，所以 Obscura 必须先于巡查就绪：`Requires=` 拉起它、`After=` 排好顺序、`PartOf=` 让它在巡查单元停止时一并停掉（`Type=oneshot` 跑完即停，不会跨轮驻留）。内存相关的参数需依环境配置针对调整。
 
 ## 开发
 
