@@ -243,11 +243,9 @@ bot run --from-api --dry-run          # 完全不碰数据库
 
 ## 定时与通知
 
-本工具只干一件事：**跑一轮巡查，出报告，退出**（成功 0，失败非 0）。渲染后端**不是常驻服务**——它随巡查同起同停，跑完连浏览器池一起消失，不给内存泄漏留任何跨轮的存活面。调度交给 systemd：它比 crontab 强的三点正对着生产巡查的需求：**资源上限**（整轮一个 cgroup，封顶后随单元销毁）、**起停次序**（CDP 服务没就绪绝不启动巡查）、**故障传播**（失败即拉起告警实例，开机补跑错过的轮次）。
+本工具只干一件事：**跑一轮巡查，出报告，退出**（成功 0，失败非 0）。渲染后端随巡查同起同停。调度用 systemd：比 crontab 强在资源上限（整轮一个 cgroup，随单元销毁）、起停次序、故障传播（失败拉告警、开机补跑错过的轮次）。
 
-只需两个单元，都在 `/etc/systemd/system/`。
-
-`autocheck.service`——`Type=oneshot`，渲染器在 `ExecStartPre` 里起来、随单元消亡：
+`/etc/systemd/system/autocheck.service`：
 
 ```ini
 [Unit]
@@ -255,41 +253,24 @@ Description=Travellings autocheck (one pass)
 
 [Service]
 Type=oneshot
-# 凭据不进命令行（命令行会进 journal 与 ps）
+# 凭据不进命令行（会进 journal 与 ps）
 EnvironmentFile=/etc/autocheck.env
 
-# 注：systemd 的指令值必须单行，下面靠行尾反斜杠续行，别手滑去掉。
-# 渲染器随起：端口已有人监听就复用（调试时手动起过 obscura 不会被抢端口），
-# 否则在本单元 cgroup 内起一个，并等 CDP 端口真的可用——就绪门控是必需的：
-# 巡查连不上 --cdp-url 会静默回退本地 Chrome，没有这道等待就可能看起来
-# "跑了 Obscura" 实际跑的是 Chrome。
-ExecStartPre=/bin/bash -c '\
-  if (exec 3<>/dev/tcp/127.0.0.1/9222) 2>/dev/null; then exit 0; fi; \
-  /usr/local/bin/obscura serve --workers 8 --worker-max-rss 1024 --quiet & \
-  for i in $(seq 100); do \
-    (exec 3<>/dev/tcp/127.0.0.1/9222) 2>/dev/null && exit 0; \
-    sleep 0.1; \
-  done; \
-  echo "obscura 未在 10s 内监听 9222" >&2; exit 1; \
-'
-
-# 巡查本体：参数默认值即对齐上面的地址，无需 --cdp-url
+# Obscura 秒级就绪，直接后台起即可；巡查连不上 --cdp-url 会静默回退本地 Chrome，
+# 所以这里起的就是本轮实际用的渲染器
+ExecStartPre=/bin/bash -c 'obscura serve --workers 8 --worker-max-rss 1024 --quiet &'
 ExecStart=/usr/local/bin/bot run --write --driver mysql
 
-# 一轮之内 bot + obscura 全在同一个 cgroup，合计封顶 1.5G
 MemoryMax=1.5G
-# 单元停止时按 cgroup 清扫：ExecStartPre 里的 obscura 一起带走，不留孤儿进程
+# 单元停止按 cgroup 清扫，Obscura 一起带走，零跨轮残留
 KillMode=control-group
-# 失败传播：任意一步非 0 退出即拉告警实例（%n 展开为本单元名）
 OnFailure=autocheck-alert@%n.service
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-巡查跑完 `bot` 退出 → oneshot 单元转为 inactive → systemd 按 `KillMode=control-group` 收掉整个 cgroup，**Obscura 随之一同退出**。不需要额外的停服务动作，也不会出现"上一轮的浏览器还在吃内存"。`--worker-max-rss` 管的是**单轮之内**的 worker 回收（长时间渲染涨得快），`MemoryMax` 是整轮的硬顶，两层各管各的时间尺度。
-
-`autocheck.timer`——只负责点火，本身不执行任何命令：
+`/etc/systemd/system/autocheck.timer`（同名约定：到点对 autocheck.service 发起 start job）：
 
 ```ini
 [Unit]
@@ -297,14 +278,12 @@ Description=Daily 04:00 Travellings autocheck
 
 [Timer]
 OnCalendar=*-*-* 04:00:00
-# 停机错过了 04:00，开机立刻补跑一轮——crontab 做不到
+# 停机错过的轮次，开机立刻补跑
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 ```
-
-没有 `Unit=` 行，靠 systemd 的同名约定：`autocheck.timer` 到点即对 `autocheck.service` 发起 start job。`autocheck.service` 不必 `enable`（那是"开机立即跑一轮"才需要的显式绑定），**只 enable timer**，否则开机 + 定时会双触发。
 
 `/etc/autocheck.env`：
 
@@ -313,19 +292,16 @@ DB_DRIVER=mysql
 DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname
 ```
 
-启用与观察：
-
 ```sh
 systemctl daemon-reload
+# 只 enable timer；连 service 一起 enable 会开机+定时双触发
 systemctl enable --now autocheck.timer
-systemctl list-timers autocheck.timer    # 下次触发点
-systemctl start autocheck.service        # 手动插一轮，链路与定时完全一致
-journalctl -u autocheck.service          # 报告与日志都在 journal
+systemctl list-timers autocheck.timer
+systemctl start autocheck.service   # 手动插一轮
+journalctl -u autocheck.service
 ```
 
-通知不塞进巡查本体：失败告警走上面的 `OnFailure` 钩子；要把成功结果也发进群（Telegram / 飞书 / 任意 webhook），拿 `--format json` 的判定流在外层接 `jq` + `curl` 即可。
-
-代价说清楚：随起随停意味着每轮多付一次 Obscura 的冷启动（worker 池拉起，秒级）。换来的是零跨轮内存残留与"不需要有人记着去重启那个常驻服务"。
+通知不进巡查本体：失败走 `OnFailure`；成功结果要发群就接 `--format json` 的判定流 + `jq`/`curl`。
 ## 开发
 
 ```sh
