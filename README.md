@@ -100,7 +100,7 @@ Global Flags:
 
 #### --dsn
 
-MySQL 连接串，形如 `user:pass@tcp(host:3306)/dbname`；留空读 `DB_DSN`。**DSN 带凭据，别写进命令行**——命令行会进 journal 和 `ps`，放 systemd `EnvironmentFile` 或环境变量里。
+MySQL 连接串，形如 `user:pass@tcp(host:3306)/dbname`；留空读 `DB_DSN`。带凭据，建议走 `EnvironmentFile` 而不是命令行。
 
 #### --fetch-queue
 
@@ -215,7 +215,7 @@ obscura serve --workers 8
 
 `--workers` 是 Obscura 侧的渲染进程数；bot 侧的 `--browser-workers` 应当小于它（见上文速查表说明）。
 
-生产上不必手动起服务：见「定时与通知」，渲染器由巡查单元随起随停。上面这条命令用于本地调试与临时手跑。
+生产部署见「定时」：Obscura 做成独立 unit，随巡查单元起停。上面这条命令用于本地调试与临时手跑。
 
 **Chrome 或任何 CDP 兼容后端同理**，用 `--cdp-url` 指过去即可。不想起外部服务也能跑：连不上 `--cdp-url` 时自动回退到本地自启的无头 Chrome（CI / 临时机器可用），此时 `--cdp-conns` 强制压回 1，防止意外拉起多个 Chrome 进程。
 
@@ -239,38 +239,41 @@ bot run --from-api --dry-run          # 完全不碰数据库
 - 占比闸门：本轮 RUN 占比低于 `--min-run-percentage`（默认 50）说明大概率是我们自己出了问题，整轮丢弃不写库；`--limit` 时闸门自动禁用
 - `^C` 中断的轮次无论如何不写库——已判定的一小部分不能代表全量清单
 
-`--from-api` 从 `https://api.travellings.cn/all` 取站点清单，与 `--write` 互斥（API 清单没有行级上下文，写不回库），适合零依赖跑 baseline。
+## 定时
 
-## 定时与通知
+渲染后端做成独立 unit，生命周期绑在巡查单元上：巡查起它起，巡查停它停。三个文件都在 `/etc/systemd/system/`。
 
-本工具只干一件事：**跑一轮巡查，出报告，退出**（成功 0，失败非 0）。渲染后端随巡查同起同停。调度用 systemd：比 crontab 强在资源上限（整轮一个 cgroup，随单元销毁）、起停次序、故障传播（失败拉告警、开机补跑错过的轮次）。
+`obscura.service`：
 
-`/etc/systemd/system/autocheck.service`：
+```ini
+[Unit]
+Description=Obscura CDP server
+PartOf=autocheck.service
+
+[Service]
+ExecStart=/usr/local/bin/obscura serve --workers 8 --worker-max-rss 1024 --quiet
+MemoryMax=1G
+```
+
+`autocheck.service`：
 
 ```ini
 [Unit]
 Description=Travellings autocheck (one pass)
+Requires=obscura.service
+After=obscura.service
 
 [Service]
 Type=oneshot
-# 凭据不进命令行（会进 journal 与 ps）
 EnvironmentFile=/etc/autocheck.env
-
-# Obscura 秒级就绪，直接后台起即可；巡查连不上 --cdp-url 会静默回退本地 Chrome，
-# 所以这里起的就是本轮实际用的渲染器
-ExecStartPre=/bin/bash -c 'obscura serve --workers 8 --worker-max-rss 1024 --quiet &'
 ExecStart=/usr/local/bin/bot run --write --driver mysql
-
-MemoryMax=1.5G
-# 单元停止按 cgroup 清扫，Obscura 一起带走，零跨轮残留
-KillMode=control-group
-OnFailure=autocheck-alert@%n.service
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`/etc/systemd/system/autocheck.timer`（同名约定：到点对 autocheck.service 发起 start job）：
+`autocheck.timer`：
 
 ```ini
 [Unit]
@@ -278,7 +281,6 @@ Description=Daily 04:00 Travellings autocheck
 
 [Timer]
 OnCalendar=*-*-* 04:00:00
-# 停机错过的轮次，开机立刻补跑
 Persistent=true
 
 [Install]
@@ -294,14 +296,14 @@ DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname
 
 ```sh
 systemctl daemon-reload
-# 只 enable timer；连 service 一起 enable 会开机+定时双触发
 systemctl enable --now autocheck.timer
+systemctl start autocheck.service
 systemctl list-timers autocheck.timer
-systemctl start autocheck.service   # 手动插一轮
-journalctl -u autocheck.service
+journalctl -u autocheck.service -u obscura.service
 ```
 
-通知不进巡查本体：失败走 `OnFailure`；成功结果要发群就接 `--format json` 的判定流 + `jq`/`curl`。
+巡查连不上 `--cdp-url` 会静默回退本地 Chrome，所以 Obscura 必须先于巡查就绪：`Requires=` 拉起它、`After=` 排好顺序、`PartOf=` 让它在巡查单元停止时一并停掉（`Type=oneshot` 跑完即停，不会跨轮驻留）。只 enable timer——连 `autocheck.service` 一起 enable 会开机加定时双触发。
+
 ## 开发
 
 ```sh
