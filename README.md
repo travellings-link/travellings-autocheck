@@ -86,6 +86,70 @@ Global Flags:
 
 通常无需设置此参数，当程序连接到外部 CDP 服务时，此值默认等于 `--browser-workers`；当程序没有连上外部 CDP 而回退到 Chrome 时，会强制设置此值为 1。
 
+#### --cdp-url
+
+浏览器调试端点，默认 `ws://127.0.0.1:9222/devtools/browser`——正是 Obscura serve 的默认监听地址。程序先用它探活一次：连上了就用这个外部浏览器；连不上**自动回退**为自启一个本地无头 Chrome（CI / 临时机器不会空跑，日志会提示回退）。
+
+#### --driver
+
+数据库类型，`sqlite` 或 `mysql`。只要碰库就要给：不配 `--from-api` 时清单从库读（dry-run 也算读库），配 `--write` 时判定写回。留空则读环境变量 `DB_DRIVER`。
+
+#### --dry-run
+
+强制不写库，即使同时给了 `--write` 也以它为准。演练、出 baseline、CI 校验都用这个。
+
+#### --dsn
+
+MySQL 连接串，形如 `user:pass@tcp(host:3306)/dbname`；留空读 `DB_DSN`。**DSN 带凭据，别写进命令行**——命令行会进 journal 和 `ps`，放 systemd `EnvironmentFile` 或环境变量里。
+
+#### --fetch-queue
+
+抓取到判定的队列深度，默认 8。抓取阶段快、判定是单点收口，中间用这条队列缓冲「已抓取待判定」的页面——这就是反压机制。为什么不调大：队列每条携带整页 HTML（上限 2MB），调大只会多吃内存，判定吞吐不变（收口的 Judge 只有一个）。
+
+#### --format
+
+`table`（默认）输出人类可读报告：状态分布 + 问题站点明细；`json` 每站点一行判定，供脚本消费。日志一律走 stderr 或 `--log-file`，所以 stdout 是干净的数据流，可以直接 `bot run --format json --from-api | jq`。
+
+#### --from-api
+
+站点清单改从 `https://api.travellings.cn/all` 拉取，全程不碰数据库，且与 `--write` 互斥（API 清单没有行级上下文，写不回库）。注意口径：API 只有布尔 `isManualChecked`、没有 `lastManualCheck` 时间戳，因此不做 30 天豁免、全量扫——**与生产待巡清单不等价**，适合打 baseline / 对比，不适合当正式巡查。
+
+#### --http-workers
+
+抓取阶段并发数，默认 20。HTTP 抓取便宜，约束主要在本地带宽与对方站点的容忍度；跑在判定前面的部分由 `--fetch-queue` 反压兜住，不会无限堆内存。
+
+#### --js-settle
+
+渲染阶段等待 SPA 挂载的上限（毫秒），默认 8000。是上限不是死等：渲染带回执判定，页面里一出现有效入口立刻返回，快站几百毫秒就交卷；只有确实慢的站才会等满。调太小会误伤慢 SPA 站（判成站点超时、本轮不写库）；调太大纯粹烧渲染预算。
+
+#### --limit
+
+本轮最多巡查前 N 个站点，0 为全量。快速验证用的。给 `--limit` 时**占比闸门自动禁用**——部分结果代表不了全量，拿它判 RUN 占比只会误判。
+
+#### --min-run-percentage
+
+占比闸门阈值，默认 50（%）。本轮 RUN 占比低于它就整轮丢弃不写库。防的是我们自己：断网、CDP 挂掉这类故障会让大面积站点被误判 TIMEOUT/ERROR，写库等于用自己的故障判大面积站点死刑（配合 IGNORE 计数看报告，能立刻分辨是站点坏了还是工具链坏了）。
+
+#### --render-retries
+
+渲染失败后的重试次数，默认 2。失败站点丢回渲染池队尾重新排队（不堵正在排队的站点），偶发的超时、CDP 抖动往往重跑就过——直接判死会误伤好站。确定性失败不重试：域名解析不了、证书过期、协议不支持，重试多少次结果都一样，白白占着浏览器池。0 为关闭重试。
+
+#### --sqlite
+
+sqlite 文件路径（配 `--driver sqlite` 使用），留空读 `SQLITE_PATH`。
+
+#### --stage
+
+巡查深度。`both`（默认）= 抓取先判，未命中的升级浏览器渲染终判，正常生产口径；`raw` = 只抓取不渲染，最快最省，但内容在 JS 里的 SPA 站会被判 LOST（误杀面见 `--from-api` 同款说明）；`js` = 全部站点交浏览器渲染（抓取阶段仍会跑，但其结果不做判定），终判最全、成本最高，适合拿一轮数据校准两种口径的翻转名单。
+
+#### --timeout
+
+抓取阶段单请求超时（毫秒），默认 15000。用满预算仍无响应直接终判 TIMEOUT、**不升级渲染**——抓取等不到的，浏览器进去也只是把等待重演一遍，最后仍超时收场（实测一个站白烧 15s+30s=45s），结论不会变。
+
+#### --write
+
+把判定写回线上 webs 表；不给就是 dry-run，只出报告不写库。写库范围与契约（只动三列、WAIT 不变量、双闸门、中断轮不写）见「数据库」一节。
+
 ### check
 
 判定单个站点是否仍挂有开往入口，**不读也不写数据库**——手边有网址想快速确认时用这个，不用起一整轮巡查。
@@ -177,14 +241,82 @@ bot run --from-api --dry-run          # 完全不碰数据库
 
 ## 定时与通知
 
-本工具只干一件事：**跑一轮巡查，出报告，退出**（成功 0，失败非 0）。常驻调度与结果通知刻意解耦在外层：
+本工具只干一件事：**跑一轮巡查，出报告，退出**（成功 0，失败非 0）。调度交给 systemd——比 crontab 好的地方正对着生产巡查的三个需求：**资源上限**（巡查进程每轮退出、内存归零，常驻的渲染服务有 cgroup 封顶，防泄漏拖垮整机）、**启停顺序**（巡查必须等 CDP 服务就绪）、**故障传播**（依赖服务重启、失败告警，都是事件驱动的，不靠下一次轮询发现）。
 
-```crontab
-0 4 * * * /usr/local/bin/bot run --write >> /var/log/autocheck.log 2>&1
+三个单元。渲染后端常驻服务 `/etc/systemd/system/obscura.service`：
+
+```ini
+[Unit]
+Description=Obscura CDP server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/obscura serve --workers 8 --worker-max-rss 1024
+Restart=on-failure
+RestartSec=2
+# 兜底上限：worker 回收参数漏配也不至于拖垮整机
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-cron / systemd timer / serverless 拉起均可；DSN 含凭据，建议走环境变量 `DB_DSN` 而不是写进命令行。想把结果发进群（Telegram / 飞书 / 任意 webhook），拿 `--format json` 的判定流自己接一层即可，比如 `jq` + `curl`。
+`--worker-max-rss 1024` 让 Obscura 单个 worker 常驻超 1GB 即自动回收——常驻渲染器的内存就是这么防的；`MemoryMax` 是再外面一层的 cgroup 保险。
 
+巡查服务 `/etc/systemd/system/autocheck.service`（`Type=oneshot`，跑完即退，内存不跨轮累积）：
+
+```ini
+[Unit]
+Description=Travellings autocheck (one pass)
+# 启停顺序：CDP 服务不在了，巡查不启动；obscura 重启期间 timer 到点也不会插队
+Requires=obscura.service
+After=obscura.service
+
+[Service]
+Type=oneshot
+# 凭据不进命令行（命令行会进 journal 与 ps）
+EnvironmentFile=/etc/autocheck.env
+ExecStart=/usr/local/bin/bot run --write --driver mysql
+MemoryMax=1G
+# 失败传播：任意一轮炸了，拉一个告警实例（模板单元里 curl 群 webhook 即可）
+OnFailure=autocheck-alert@%n.service
+
+[Install]
+WantedBy=multi-user.target
+```
+
+定时器 `/etc/systemd/system/autocheck.timer`：
+
+```ini
+[Unit]
+Description=Daily 04:00 Travellings autocheck
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+# 停机错过了 04:00，开机立刻补跑一轮——crontab 做不到
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`/etc/autocheck.env`：
+
+```ini
+DB_DRIVER=mysql
+DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname
+```
+
+启用与观察：
+
+```sh
+systemctl daemon-reload
+systemctl enable --now obscura autocheck.timer
+systemctl list-timers autocheck.timer    # 下次触发点
+journalctl -u autocheck.service          # 报告与日志都在 journal
+```
+
+通知不塞进巡查本体：失败告警走上面的 `OnFailure` 钩子；要把成功结果也发进群（Telegram / 飞书 / 任意 webhook），拿 `--format json` 的判定流在外层接 `jq` + `curl` 即可。
 ## 开发
 
 ```sh
@@ -218,4 +350,4 @@ flags.go    run 的全部参数定义
 ## 版权
 
 Under [GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
-2025 © Travellings-link Project. All rights reserved.
+2026 © Travellings-link Project. All rights reserved.
