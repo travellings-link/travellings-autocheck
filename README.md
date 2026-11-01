@@ -266,8 +266,6 @@ After=obscura.service
 
 [Service]
 Type=oneshot
-# oneshot 默认 90s 启动超时，长轮会被掐：上限给到最坏一轮
-TimeoutStartSec=2h  # 按需调整
 EnvironmentFile=/etc/autocheck.env
 # --log-file 按需调整
 ExecStart=/usr/local/bin/bot run --write --driver mysql --log-file "/root/travellings-autocheck.log"
