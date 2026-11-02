@@ -872,6 +872,14 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 	// 若留到 defer，报表会盖在旧帧下面，看起来就像没跑到 100%。
 	stopProg()
 
+	// 通知：跑完就发（webhook 未配置则内部静默跳过），标题色 = 本轮是否实际写库。
+	notify := func(written bool) {
+		if err := notifyFeishu(ctx, buildFeishuCard(verdicts, elapsed, written)); err != nil {
+			log.Error().Err(err).Msg("飞书通知发送失败")
+		} else {
+			log.Info().Bool("written", written).Msg("飞书通知已发送")
+		}
+	}
 	if cfg.Format == "json" {
 		if err := writeJSON(verdicts); err != nil {
 			return err
@@ -885,10 +893,12 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 		// 「没查到」当成「站点坏了」落盘，会污染线上 status。
 		log.Warn().Int("judged", len(verdicts)).Int("total", total).
 			Msg("巡查被中断，本轮结果不写库")
+		notify(false)
 		return nil
 	}
 	if !cfg.Write {
 		log.Info().Msg("dry-run：未写库")
+		notify(false)
 		return nil
 	}
 	// 写库必须有连接。FromAPI 与 Write 在入口已互斥，
@@ -904,22 +914,16 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 		log.Info().Float64("run_pct", pct).Int("sites", count).Msg("RUN 占比")
 		if pct < cfg.MinPct {
 			log.Warn().Float64("min_pct", cfg.MinPct).Msg("低于阈值，本轮结果丢弃不写库")
+			notify(false)
 			return nil
 		}
 	}
 	ups := verdicts2updates(verdicts)
 	if err := db.WriteVerdicts(d, ups); err != nil {
+		notify(false)
 		return fmt.Errorf("write verdicts: %w", err)
 	}
 	log.Info().Int("sites", len(ups)).Msg("已写回")
-
-	// 通知只在写库成功后发：dry-run、中断轮、被占比闸门丢弃的轮次都不发——
-	// 那三种路径在上方已 return，各自有日志与退出码表达。通知失败不推翻巡查结果，
-	// 数据已经落库，这里只记一条 error。
-	if err := notifyFeishu(ctx, buildFeishuCard(verdicts, elapsed)); err != nil {
-		log.Error().Err(err).Msg("飞书通知发送失败")
-	} else {
-		log.Info().Msg("飞书通知已发送")
-	}
+	notify(true)
 	return nil
 }

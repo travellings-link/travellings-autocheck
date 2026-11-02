@@ -61,7 +61,7 @@ func TestZZWritePreview(t *testing.T) {
 	add(check.Verdict("403"), 233, "cf", "HTTP 403", false, false)
 	add(check.Lost, 61, "lost", "no entry after render", false, false)
 	add(check.Run, 9, "infra", "infra js-leg: attach cdp", true, false)
-	writeCardFile("autocheck-report.card", buildFeishuCard(vs, 1*time.Hour+23*time.Minute+46*time.Second))
+	writeCardFile("autocheck-report.card", buildFeishuCard(vs, 1*time.Hour+23*time.Minute+46*time.Second, true))
 }
 func itoa(n int) string {
 	return fmt.Sprint(n)

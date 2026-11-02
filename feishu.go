@@ -140,7 +140,7 @@ func categoryFor(v pipeline.Verdict) optCell {
 
 // buildFeishuCard 生成巡查报告卡片：柱图看分布、明细表给原因。
 // 计数口径与终端报告一致（IGNORE 不混进正常状态）；RUN 站点不进明细表。
-func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration) feishuCard {
+func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool) feishuCard {
 	runN, lostN, errN, tmoN, httpN, ignoreN := 0, 0, 0, 0, 0, 0
 	for _, v := range vs {
 		if isIgnore(v) {
@@ -243,11 +243,11 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration) feishuCard {
 		}
 	}
 
+	// 标题色只回答一个问题：本轮结果实际进库了没有。
+	// green=已写入；red=未写入（dry-run / 中断 / 闸门丢弃 / 写库失败，不分原因）。
+	// 运维在群里扫一眼就知道要不要去补跑，而不是猜几分算健康。
 	template := "red"
-	if runPct >= 70 {
-		template = "orange"
-	}
-	if runPct >= 90 {
+	if written {
 		template = "green"
 	}
 
@@ -276,7 +276,8 @@ func notifyFeishu(ctx context.Context, card feishuCard) error {
 	if err != nil {
 		return err
 	}
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// WithoutCancel：中断轮同样要发通知，那时父 ctx 已取消，直接继承会秒失败。
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodPost, hook, bytes.NewReader(body))
 	if err != nil {
