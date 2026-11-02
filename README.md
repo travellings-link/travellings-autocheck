@@ -305,7 +305,7 @@ systemctl list-timers autocheck.timer
 journalctl -u autocheck.service -u obscura.service
 ```
 
-写库成功后自动发一张飞书交互卡片（`FEISHU_WEBHOOK` 未配置则跳过；文本含「巡查」满足关键词鉴权）。
+每轮跑完自动发一张飞书交互卡片（`FEISHU_WEBHOOK` 未配置则跳过；文本含「巡查」满足关键词鉴权）。标题颜色 = 本轮是否实际写库：green 已写入，red 未写入（dry-run / 中断 / 闸门丢弃 / 写库失败）——群里扫一眼就知道要不要补跑。
 
 巡查连不上 `--cdp-url` 会静默回退本地 Chrome，所以 Obscura 必须先于巡查就绪：`Requires=` 拉起它、`After=` 排好顺序、`PartOf=` 让它在巡查单元停止时一并停掉（`Type=oneshot` 跑完即停，不会跨轮驻留）。内存相关的参数需依环境配置针对调整。
 
