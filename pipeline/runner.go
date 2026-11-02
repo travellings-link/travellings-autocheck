@@ -25,7 +25,9 @@ func SetLogger(l zerolog.Logger) { pkglog = l }
 
 // Verdict 是单个站点的最终判定（内存结果）。不碰 DB。
 type Verdict struct {
-	SiteID   int
+	SiteID int
+	// Name 供通知明细表展示；--from-api 模式无名字（该模式不写库也不通知）。
+	Name     string
 	URL      string
 	Status   check.Verdict
 	Stage    check.Stage
@@ -156,8 +158,9 @@ func (s *StageStats) finish() {
 
 // Site 是从清单（数据库或 API）读到的一条待巡记录，作为 Fetcher 的输入。
 type Site struct {
-	ID  int
-	URL string
+	ID   int
+	Name string
+	URL  string
 }
 
 // Run 执行单次全量巡查（不含写库）。返回内存 verdict 列表。
@@ -383,7 +386,7 @@ func Run(ctx context.Context, sites []Site, opts Options) []Verdict {
 				}
 				if rawOnly {
 					v := check.Evaluate(in.Page, check.Raw)
-					add(Verdict{SiteID: in.Site.ID, URL: in.Site.URL, Status: v.Verdict,
+					add(Verdict{SiteID: in.Site.ID, Name: in.Site.Name, URL: in.Site.URL, Status: v.Verdict,
 						Stage: check.Raw, Evidence: v.Evidence})
 					markDone()
 					continue
@@ -409,7 +412,7 @@ func Run(ctx context.Context, sites []Site, opts Options) []Verdict {
 						return
 					}
 				} else {
-					add(Verdict{SiteID: in.Site.ID, URL: in.Site.URL, Status: v.Verdict,
+					add(Verdict{SiteID: in.Site.ID, Name: in.Site.Name, URL: in.Site.URL, Status: v.Verdict,
 						Stage: check.Raw, Evidence: v.Evidence})
 					markDone()
 				}
@@ -458,7 +461,7 @@ func Run(ctx context.Context, sites []Site, opts Options) []Verdict {
 	if !rawOnly {
 		close(pending)
 		pumpWG.Wait()
-		close(renderCh)     // Renderer 池退出后会自己关 renderedCh（见上）
+		close(renderCh) // Renderer 池退出后会自己关 renderedCh（见上）
 		finalWG.Wait()
 	}
 	if opts.Stats != nil {
@@ -495,9 +498,9 @@ func evalRendered(in Incoming) Verdict {
 	// 责任方是站点（页面太重/服务端太慢），不是我们的工具链。
 	if in.NavTimeout != "" {
 		return Verdict{
-			SiteID: in.Site.ID, URL: in.Site.URL,
+			SiteID: in.Site.ID, Name: in.Site.Name, URL: in.Site.URL,
 			Status: check.Timeout, Stage: check.JS,
-			Evidence: "nav timeout: " + in.NavTimeout,
+			Evidence:   "nav timeout: " + in.NavTimeout,
 			NavTimeout: in.NavTimeout,
 		}
 	}
@@ -506,14 +509,14 @@ func evalRendered(in Incoming) Verdict {
 	if in.InfraErr != "" {
 		v := check.Evaluate(check.Page{FetchErr: in.InfraErr}, check.JS)
 		return Verdict{
-			SiteID: in.Site.ID, URL: in.Site.URL,
+			SiteID: in.Site.ID, Name: in.Site.Name, URL: in.Site.URL,
 			Status: v.Verdict, Stage: check.JS,
 			Evidence: "infra js-leg: " + in.InfraErr,
 			InfraErr: in.InfraErr,
 		}
 	}
 	v := check.Evaluate(in.Page, check.JS)
-	return Verdict{SiteID: in.Site.ID, URL: in.Site.URL, Status: v.Verdict, Stage: check.JS, Evidence: v.Evidence}
+	return Verdict{SiteID: in.Site.ID, Name: in.Site.Name, URL: in.Site.URL, Status: v.Verdict, Stage: check.JS, Evidence: v.Evidence}
 }
 
 // RenderQueue 返回 Judge→Renderer 队列容量。

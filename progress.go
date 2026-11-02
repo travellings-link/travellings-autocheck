@@ -29,19 +29,19 @@ import (
 // 渲染阶段的分母是**动态**的：判定出多少站要升级，分母就涨到多少。
 // 因此它的百分比在跑到一半时可能回落，这是真实语义，不做平滑。
 type progressView struct {
-	mu       sync.Mutex
-	w        io.Writer
-	enabled  bool
-	total    int
-	stats    *pipeline.StageStats
-	start    time.Time
+	mu        sync.Mutex
+	w         io.Writer
+	enabled   bool
+	total     int
+	stats     *pipeline.StageStats
+	start     time.Time
 	lastDraw  time.Time
 	drawn     int
-	lastFrame []string      // 最近一帧，Suspend 后原样重画
-	suspended bool          // 正在让位给其他输出，期间禁止绘制
+	lastFrame []string       // 最近一帧，Suspend 后原样重画
+	suspended bool           // 正在让位给其他输出，期间禁止绘制
 	bar       progress.Model // bubbles 进度条模型
-	stopped   bool          // Finish 后禁止再画，防止 ticker 收尾竞态
-	done      chan struct{} // Start 的 goroutine 退出信号
+	stopped   bool           // Finish 后禁止再画，防止 ticker 收尾竞态
+	done      chan struct{}  // Start 的 goroutine 退出信号
 }
 
 // activeProg 指向当前正在画的进度条，供日志 writer 让位使用。

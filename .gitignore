@@ -40,3 +40,6 @@ go.work.sum
 /*.log
 bot.exe
 /dist/
+
+card_preview_*.json
+card_preview_*.card

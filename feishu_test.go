@@ -30,7 +30,8 @@ func TestFeishuSkipsWithoutWebhook(t *testing.T) {
 	}
 }
 
-// 载荷结构 msg_type=interactive + card；卡片序列化后的文本必须含「巡查」（关键词鉴权）。
+// 载荷 msg_type=interactive；文本含「巡查」（关键词鉴权）；
+// 明细表绝不允许出现可信 RUN 站点；HTTP 码在图里合并成一个桶。
 func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 	var got struct {
 		MsgType string          `json:"msg_type"`
@@ -44,10 +45,11 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 	t.Setenv("FEISHU_WEBHOOK", srv.URL)
 
 	vs := []pipeline.Verdict{
-		{Status: check.Run}, {Status: check.Run},
-		{Status: check.Lost},
-		{Status: check.Verdict("403")},
-		{Status: check.Timeout, NavTimeout: "nav timeout"}, // IGNORE，不混进 TIMEOUT
+		{SiteID: 1, Status: check.Run, Name: "khbit", URL: "https://khbit.cn"},
+		{SiteID: 2, Status: check.Run, Name: "wayjam", URL: "https://wayjam.me"},
+		{SiteID: 3, Status: check.Lost, Name: "example", URL: "https://example.com"},
+		{SiteID: 4, Status: check.Verdict("403"), Name: "spa", URL: "https://lakeus.example"},
+		{SiteID: 5, Status: check.Timeout, NavTimeout: "nav timeout", Name: "slow", URL: "https://slow.example"}, // IGNORE
 	}
 	if err := notifyFeishu(context.Background(), buildFeishuCard(vs, 37*time.Minute)); err != nil {
 		t.Fatalf("发送失败: %v", err)
@@ -55,23 +57,26 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 	if got.MsgType != "interactive" {
 		t.Fatalf("msg_type 应为 interactive，得到 %q", got.MsgType)
 	}
-	// 「巡查」必须出现在卡片文本里——关键词鉴权查的是整条消息的可检索文本
-	if !strings.Contains(string(got.Card), "巡查") {
-		t.Fatalf("卡片文本必须含「巡查」二字，得到: %s", got.Card)
+	card := string(got.Card)
+	if !strings.Contains(card, "巡查") {
+		t.Fatalf("文本必须含「巡查」二字（关键词鉴权），得到: %s", card)
 	}
-	if !strings.Contains(string(got.Card), "column_set") {
-		t.Fatalf("应为分栏排版，得到: %s", got.Card)
+	if !strings.Contains(card, "\"RUN\"") {
+		t.Fatalf("图内应有 RUN 桶，得到: %s", card)
 	}
-	if !strings.Contains(string(got.Card), "IGNORE") {
-		t.Fatalf("IGNORE 应单独成列，得到: %s", got.Card)
+	if !strings.Contains(card, "\"HTTP\"") {
+		t.Fatalf("裸 HTTP 码应在图里合并为 HTTP 桶，得到: %s", card)
 	}
-	if !strings.Contains(string(got.Card), "RUN 占比 40.0%") {
-		t.Fatalf("次要行应含 40.0%% 占比，得到: %s", got.Card)
+	if strings.Contains(card, "40.0%") == false {
+		t.Fatalf("应展示 RUN 占比 40.0%%，得到: %s", card)
 	}
-	if !strings.Contains(string(got.Card), "403") {
-		t.Fatalf("裸 HTTP 码判定应入卡片，得到: %s", got.Card)
+	// 表格里不得出现 khbit / wayjam（可信 RUN 站被误判 IGNORE 的 5 号除外——它进表）
+	if strings.Contains(card, "khbit") || strings.Contains(card, "wayjam") {
+		t.Fatalf("RUN 站点不应进明细表，得到: %s", card)
 	}
-	t.Logf("实际卡片:\n%s", got.Card)
+	if !strings.Contains(card, "example") || !strings.Contains(card, "slow") {
+		t.Fatalf("LOST/IGNORE 站点应进明细表，得到: %s", card)
+	}
 }
 
 // HTTP 200 但 body 非零 code（关键词不匹配这类业务失败）必须算发送失败。
@@ -86,4 +91,13 @@ func TestFeishuNonZeroCodeIsError(t *testing.T) {
 		t.Fatal("非零 code 必须返回错误")
 	}
 	t.Logf("按预期拒绝: %v", err)
+}
+
+// 全 RUN 的轮次：表格缺席但卡片仍要有 note（不炸空数组）
+func TestFeishuAllRunNoTable(t *testing.T) {
+	vs := []pipeline.Verdict{{SiteID: 1, Status: check.Run, Name: "a", URL: "https://a"}}
+	b, _ := json.Marshal(buildFeishuCard(vs, time.Minute))
+	if !strings.Contains(string(b), "本轮无问题站点") {
+		t.Fatalf("全 RUN 轮应给出无问题提示: %s", b)
+	}
 }

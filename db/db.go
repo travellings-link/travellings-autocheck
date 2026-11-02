@@ -30,12 +30,12 @@ func open(cfg Config) (*gorm.DB, error) {
 
 // Web 对齐 webs 表（成员站 + 巡查状态）。name/link/tag 是成员元数据，本包只读不写。
 type Web struct {
-	ID              int        `gorm:"column:id;primaryKey"`
-	Status          string     `gorm:"column:status"`
-	Name            string     `gorm:"column:name"`
-	Link            string     `gorm:"column:link"`
-	Tag             *string    `gorm:"column:tag"`
-	FailedReason    *string    `gorm:"column:failedReason"`
+	ID           int     `gorm:"column:id;primaryKey"`
+	Status       string  `gorm:"column:status"`
+	Name         string  `gorm:"column:name"`
+	Link         string  `gorm:"column:link"`
+	Tag          *string `gorm:"column:tag"`
+	FailedReason *string `gorm:"column:failedReason"`
 	// lastManualCheck 列故意不声明字段：30 天豁免在 SQL WHERE 里完成，Go 侧从不读它的值。
 	// 一旦声明 *time.Time，mysql 驱动在 DSN 未开 parseTime 时会把 DATETIME 当 []uint8 返回、
 	// 整行扫描直接报错（2026-11-02 线上实测：unsupported Scan ... into *time.Time）。

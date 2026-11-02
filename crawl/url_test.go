@@ -6,13 +6,13 @@ import "testing"
 // 必须补全 scheme，否则抓取和渲染都会失败，好站被误判。
 func TestNormalizeURL(t *testing.T) {
 	cases := map[string]string{
-		"blog.joker2yue.com":              "https://blog.joker2yue.com",
-		"https://a.example":               "https://a.example",
-		"http://b.example":                "http://b.example",
-		"//c.example":                     "https://c.example",
-		"  blog.joker2yue.com  ":          "https://blog.joker2yue.com",
-		"ftp://d.example":                 "ftp://d.example", // 保持原样，下游判非法
-		"":                                "",
+		"blog.joker2yue.com":     "https://blog.joker2yue.com",
+		"https://a.example":      "https://a.example",
+		"http://b.example":       "http://b.example",
+		"//c.example":            "https://c.example",
+		"  blog.joker2yue.com  ": "https://blog.joker2yue.com",
+		"ftp://d.example":        "ftp://d.example", // 保持原样，下游判非法
+		"":                       "",
 	}
 	for in, want := range cases {
 		if got := normalizeURL(in); got != want {

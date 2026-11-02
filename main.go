@@ -803,7 +803,7 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 		}
 		sites = make([]pipeline.Site, 0, len(ws))
 		for _, w := range ws {
-			sites = append(sites, pipeline.Site{ID: w.ID, URL: w.Link})
+			sites = append(sites, pipeline.Site{ID: w.ID, Name: w.Name, URL: w.Link})
 		}
 		log.Debug().Str("source", "db").Int("sites", len(sites)).
 			Bool("skip_recent_30d", true).

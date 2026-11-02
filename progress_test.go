@@ -187,6 +187,7 @@ func min(a, b int) int {
 	}
 	return b
 }
+
 // 收尾竞态：Finish 之后 ticker 若再画一帧，终端上就会出现两块进度条。
 // 复现方式：Start 起 goroutine，立刻 Finish，然后反复 Tick(true)——
 // 已 stopped 的 Tick 必须完全无输出。
