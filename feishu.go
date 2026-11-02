@@ -38,11 +38,6 @@ type cardElement struct {
 	Margin  string `json:"margin,omitempty"`
 }
 
-type noteElement struct {
-	Tag      string     `json:"tag"`
-	Elements []cardText `json:"elements"`
-}
-
 type chartDatum struct {
 	Type  string `json:"type"`
 	Value int    `json:"value"`
@@ -218,7 +213,7 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 	}, cardElement{Tag: "hr", Margin: "0px 0px 0px 0px"}}
 
 	if len(rows) == 0 {
-		elements = append(elements, noteElement{Tag: "note", Elements: []cardText{{Tag: "plain_text", Content: "本轮无问题站点"}}})
+		elements = append(elements, cardElement{Tag: "markdown", Content: "本轮无问题站点", Margin: "0px 0px 0px 0px"})
 	} else {
 		shown := rows
 		if len(shown) > feishuMaxRows {
@@ -238,8 +233,10 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 			PageSize:    5, Margin: "0px 0px 0px 0px",
 		})
 		if len(rows) > feishuMaxRows {
-			elements = append(elements, noteElement{Tag: "note", Elements: []cardText{{Tag: "plain_text",
-				Content: fmt.Sprintf("问题站点共 %d 个，仅展示前 %d 条；完整清单见运行日志或 --format json", len(rows), feishuMaxRows)}}})
+			elements = append(elements, cardElement{Tag: "markdown",
+				Content: fmt.Sprintf("问题站点共 %d 个，仅展示前 %d 条；完整清单见运行日志或 --format json", len(rows), feishuMaxRows),
+				Margin:  "0px 0px 0px 0px",
+			})
 		}
 	}
 

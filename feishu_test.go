@@ -99,6 +99,22 @@ func TestFeishuTemplateReflectsWrite(t *testing.T) {
 	}
 }
 
+// schema V2 不支持 note 元素（线上实测 code=11246 拒绝）：溢出截断路径
+// 也必须只用 markdown/hr/table/chart。
+func TestFeishuNoNoteElement(t *testing.T) {
+	vs := make([]pipeline.Verdict, 0, feishuMaxRows+5)
+	for i := 0; i < feishuMaxRows+5; i++ {
+		vs = append(vs, pipeline.Verdict{SiteID: i + 1, Status: check.Lost, Name: "x", URL: "https://x", Evidence: "no entry"})
+	}
+	b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, false))
+	if strings.Contains(string(b), "\"note\"") {
+		t.Fatalf("载荷仍含 note 元素（V2 会 11246 拒绝）: %s", b)
+	}
+	if !strings.Contains(string(b), "仅展示前") {
+		t.Fatalf("溢出提示应在 markdown 里保留，得到: %s", b)
+	}
+}
+
 // HTTP 200 但 body 非零 code（关键词不匹配这类业务失败）必须算发送失败。
 func TestFeishuNonZeroCodeIsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
