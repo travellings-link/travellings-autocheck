@@ -41,5 +41,4 @@ go.work.sum
 bot.exe
 /dist/
 
-card_preview_*.json
-card_preview_*.card
+autocheck-report.card

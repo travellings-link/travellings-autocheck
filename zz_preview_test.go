@@ -40,10 +40,6 @@ func writeCardFile(name string, card feishuCard) {
 	os.WriteFile(name, c, 0o644)
 }
 
-func writeWebhookPayload(name string, card feishuCard) {
-	b, _ := json.MarshalIndent(map[string]any{"msg_type": "interactive", "card": card}, "", "  ")
-	os.WriteFile(name, b, 0o644)
-}
 
 func TestZZWritePreview(t *testing.T) {
 	vs := []pipeline.Verdict{}
@@ -65,23 +61,8 @@ func TestZZWritePreview(t *testing.T) {
 	add(check.Verdict("403"), 233, "cf", "HTTP 403", false, false)
 	add(check.Lost, 61, "lost", "no entry after render", false, false)
 	add(check.Run, 9, "infra", "infra js-leg: attach cdp", true, false)
-	card := buildFeishuCard(vs, 1*time.Hour+23*time.Minute+46*time.Second)
-	writeCardFile("card_preview_prod.card", card)
-	writeWebhookPayload("card_preview_prod.json", card)
-
-	small := []pipeline.Verdict{
-		{SiteID: 7, Status: check.Run, Name: "khbit", URL: "https://khbit.cn/", Evidence: "https://www.travellings.cn/go.html"},
-		{SiteID: 12, Status: check.Run, Name: "wayjam", URL: "https://wayjam.me/", Evidence: "https://www.travellings.cn/go.html"},
-		{SiteID: 88, Status: check.Lost, Name: "example", URL: "https://example.com/", Evidence: "no entry after render"},
-		{SiteID: 101, Status: check.Error, Name: "oalo", URL: "https://blog.oalo.cn/", Evidence: "x509: certificate has expired"},
-		{SiteID: 205, Status: check.Verdict("526"), Name: "cfbadssl", URL: "https://cf.example/", Evidence: "HTTP 526"},
-		{SiteID: 300, Status: check.Timeout, Name: "slowSPA", URL: "https://slow.example/", NavTimeout: "nav timeout", Evidence: "nav timeout: exceeded 30000ms deadline"},
-	}
-	smallCard := buildFeishuCard(small, 18*time.Minute+32*time.Second)
-	writeCardFile("card_preview_small.card", smallCard)
-	writeWebhookPayload("card_preview_small.json", smallCard)
+	writeCardFile("autocheck-report.card", buildFeishuCard(vs, 1*time.Hour+23*time.Minute+46*time.Second))
 }
-
 func itoa(n int) string {
 	return fmt.Sprint(n)
 }
