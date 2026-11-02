@@ -59,11 +59,14 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 	if !strings.Contains(string(got.Card), "巡查") {
 		t.Fatalf("卡片文本必须含「巡查」二字，得到: %s", got.Card)
 	}
-	if !strings.Contains(string(got.Card), "IGNORE 1") {
-		t.Fatalf("IGNORE 应单独成项，得到: %s", got.Card)
+	if !strings.Contains(string(got.Card), "column_set") {
+		t.Fatalf("应为分栏排版，得到: %s", got.Card)
 	}
-	if !strings.Contains(string(got.Card), "RUN 占比 **40.0%**") {
-		t.Fatalf("RUN 占比应按 2/5=40.0%% 计算（tag 删除计数前抓取），得到: %s", got.Card)
+	if !strings.Contains(string(got.Card), "IGNORE") {
+		t.Fatalf("IGNORE 应单独成列，得到: %s", got.Card)
+	}
+	if !strings.Contains(string(got.Card), "RUN 占比 40.0%") {
+		t.Fatalf("次要行应含 40.0%% 占比，得到: %s", got.Card)
 	}
 	if !strings.Contains(string(got.Card), "403") {
 		t.Fatalf("裸 HTTP 码判定应入卡片，得到: %s", got.Card)

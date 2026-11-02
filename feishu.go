@@ -20,22 +20,6 @@ import (
 //   - 环境变量 FEISHU_WEBHOOK 未配置 = 静默跳过，巡查照常（跳过不是失败）
 //   - 消息文本必须含「巡查」二字：机器人开了关键词安全设置，缺了会被服务端拒
 
-// feishuCard 是 schema 2.0 交互卡片。
-type feishuCard struct {
-	Schema string      `json:"schema"`
-	Header cardHeader  `json:"header"`
-	Body   cardBody    `json:"body"`
-}
-
-type cardHeader struct {
-	Title    cardText `json:"title"`
-	Template string   `json:"template"`
-}
-
-type cardBody struct {
-	Elements []cardElement `json:"elements"`
-}
-
 type cardText struct {
 	Tag     string `json:"tag"`
 	Content string `json:"content"`
@@ -46,8 +30,36 @@ type cardElement struct {
 	Content string `json:"content"`
 }
 
-// buildFeishuCard 把判定列表排成卡片。计数口径与终端报告一致：
-// IGNORE（工具链故障/站点超时，不写库的那批）不混进正常状态，单独成项。
+type cardColumn struct {
+	Tag      string        `json:"tag"`
+	Width    string        `json:"width"`
+	Weight   int           `json:"weight"`
+	Elements []cardElement `json:"elements"`
+}
+
+type columnSet struct {
+	Tag     string       `json:"tag"`
+	Columns []cardColumn `json:"columns"`
+}
+
+type noteElement struct {
+	Tag      string     `json:"tag"`
+	Elements []cardText `json:"elements"`
+}
+
+type cardHeader struct {
+	Title    cardText `json:"title"`
+	Template string   `json:"template"`
+}
+
+type feishuCard struct {
+	Schema string         `json:"schema"`
+	Header cardHeader     `json:"header"`
+	Body   map[string]any `json:"body"`
+}
+
+// buildFeishuCard 排版：主状态分栏（大数字），次要信息收进 note 行。
+// 计数口径与终端报告一致：IGNORE（工具链故障/站点超时，不写库那批）单独成列。
 func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration) feishuCard {
 	counts := map[string]int{}
 	ignore := 0
@@ -59,46 +71,62 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration) feishuCard {
 		counts[string(v.Status)]++
 	}
 	total := len(vs)
-
-	// 占比分子必须在 tag() 删除计数前抓走：tag("RUN") 会把 counts["RUN"] 删掉，
-	// 之后再取就恒为 0（测试实测出 RUN 占比 0.0% 就是这个）。
 	runN := counts["RUN"]
 
-	var parts []string
-	tag := func(k, icon string) {
-		if n := counts[k]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %s %d", icon, k, n))
-			delete(counts, k)
+	col := func(n int, icon, label string) cardColumn {
+		return cardColumn{
+			Tag: "column", Width: "weighted", Weight: 1,
+			Elements: []cardElement{{Tag: "markdown", Content: fmt.Sprintf("**%d**\n%s %s", n, icon, label)}},
 		}
 	}
-	tag("RUN", "\U0001F7E2")
-	tag("LOST", "\U0001F7E1")
-	tag("ERROR", "\U0001F534")
-	tag("TIMEOUT", "\u23F0")
-	// 裸 HTTP 码（403/526…）按数值排序补在后面
-	others := make([]string, 0, len(counts))
-	for k := range counts {
-		others = append(others, k)
-	}
-	sort.Strings(others)
-	for _, k := range others {
-		parts = append(parts, fmt.Sprintf("\u26AA %s %d", k, counts[k]))
-	}
+
+	cols := []cardColumn{col(runN, "\U0001F7E2", "RUN"), col(counts["LOST"], "\U0001F7E1", "LOST")}
+	delete(counts, "RUN")
+	delete(counts, "LOST")
+	cols = append(cols, col(counts["ERROR"]+counts["TIMEOUT"], "\U0001F534", "ERR/TMO"))
+	delete(counts, "ERROR")
+	delete(counts, "TIMEOUT")
 	if ignore > 0 {
-		parts = append(parts, fmt.Sprintf("\U0001F6AB IGNORE %d", ignore))
+		cols = append(cols, col(ignore, "\U0001F6AB", "IGNORE"))
 	}
 
+	// 裸 HTTP 码（403/526…）进次要行，不跟主状态抢栏位
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var others []string
+	for _, k := range keys {
+		others = append(others, fmt.Sprintf("%s\u00d7%d", k, counts[k]))
+	}
+
+	// 占比分子在 delete 前已抓走（runN），别再从 counts 里取
 	runPct := 0.0
 	if total > 0 {
 		runPct = 100 * float64(runN) / float64(total)
 	}
-	// 关键词「巡查」在标题与正文各出现一次，双保险。
-	md := fmt.Sprintf("**巡查完成 %d 站** \u00b7 用时 %s\n%s\nRUN 占比 **%.1f%%**",
-		total, elapsed.Round(time.Second), strings.Join(parts, " \u2002|\u2002 "), runPct)
+	note := fmt.Sprintf("巡查 %d 站 \u00b7 用时 %s \u00b7 RUN 占比 %.1f%%", total, elapsed.Round(time.Second), runPct)
+	if len(others) > 0 {
+		note += " \u00b7 其他 " + strings.Join(others, " \u00b7 ")
+	}
+
+	// 标题色与健康度一致，阈值同终端报告的 runPctTag（90/70）
+	template := "red"
+	if runPct >= 70 {
+		template = "orange"
+	}
+	if runPct >= 90 {
+		template = "green"
+	}
+
 	return feishuCard{
 		Schema: "2.0",
-		Header: cardHeader{Title: cardText{Tag: "plain_text", Content: "开往巡查报告"}, Template: "turquoise"},
-		Body:   cardBody{Elements: []cardElement{{Tag: "markdown", Content: md}}},
+		Header: cardHeader{Title: cardText{Tag: "plain_text", Content: "开往巡查报告"}, Template: template},
+		Body: map[string]any{"elements": []any{
+			columnSet{Tag: "column_set", Columns: cols},
+			noteElement{Tag: "note", Elements: []cardText{{Tag: "plain_text", Content: note}}},
+		}},
 	}
 }
 
