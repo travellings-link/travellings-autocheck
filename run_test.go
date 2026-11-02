@@ -27,7 +27,7 @@ func TestRunOnceSQLite(t *testing.T) {
 	}
 	// 只种一行、指向 example.com：--limit 1 就只抓这一站，外网依赖最小且稳定。
 	if err := d.Exec(
-		"INSERT INTO webs (status, name, link) VALUES ('RUN', 'example', 'https://example.com')").Error; err != nil {
+		"INSERT INTO webs (status, name, link, lastManualCheck) VALUES ('RUN', 'example', 'https://example.com', '2026-01-01 00:00:00')").Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// 建库用的这条连接用完即关：否则它在 t.TempDir 清理时仍握着文件句柄，

@@ -294,6 +294,7 @@ WantedBy=timers.target
 ```ini
 DB_DRIVER=mysql
 DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname  # 按需调整
+FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx  # 可选，留空则跳过通知
 ```
 
 ```sh
@@ -303,6 +304,8 @@ systemctl start autocheck.service
 systemctl list-timers autocheck.timer
 journalctl -u autocheck.service -u obscura.service
 ```
+
+写库成功后自动发一张飞书交互卡片（`FEISHU_WEBHOOK` 未配置则跳过；文本含「巡查」满足关键词鉴权）。
 
 巡查连不上 `--cdp-url` 会静默回退本地 Chrome，所以 Obscura 必须先于巡查就绪：`Requires=` 拉起它、`After=` 排好顺序、`PartOf=` 让它在巡查单元停止时一并停掉（`Type=oneshot` 跑完即停，不会跨轮驻留）。内存相关的参数需依环境配置针对调整。
 

@@ -912,5 +912,14 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 		return fmt.Errorf("write verdicts: %w", err)
 	}
 	log.Info().Int("sites", len(ups)).Msg("已写回")
+
+	// 通知只在写库成功后发：dry-run、中断轮、被占比闸门丢弃的轮次都不发——
+	// 那三种路径在上方已 return，各自有日志与退出码表达。通知失败不推翻巡查结果，
+	// 数据已经落库，这里只记一条 error。
+	if err := notifyFeishu(ctx, buildFeishuCard(verdicts, elapsed)); err != nil {
+		log.Error().Err(err).Msg("飞书通知发送失败")
+	} else {
+		log.Info().Msg("飞书通知已发送")
+	}
 	return nil
 }

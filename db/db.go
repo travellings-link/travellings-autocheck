@@ -36,7 +36,9 @@ type Web struct {
 	Link            string     `gorm:"column:link"`
 	Tag             *string    `gorm:"column:tag"`
 	FailedReason    *string    `gorm:"column:failedReason"`
-	LastManualCheck *time.Time `gorm:"column:lastManualCheck"`
+	// lastManualCheck 列故意不声明字段：30 天豁免在 SQL WHERE 里完成，Go 侧从不读它的值。
+	// 一旦声明 *time.Time，mysql 驱动在 DSN 未开 parseTime 时会把 DATETIME 当 []uint8 返回、
+	// 整行扫描直接报错（2026-11-02 线上实测：unsupported Scan ... into *time.Time）。
 }
 
 // TableName 固定 webs 表（gorm 默认会把 Web 复数成 webs，但显式写出防歧义）。
