@@ -357,14 +357,16 @@ bot worker --master ms.internal:9500 --token "$MS_TOKEN" \
 可覆盖），反复炸超预算则按不写库终结，轮照样收口。判定语汇、写库契约（WAIT 不变量、
 RUN 占比闸门、\`InfraErr/NavTimeout\` 不写库）与单机逐条一致。
 
-**对照回归**（上线前必跑一次）：主从与单机对同一份清单应产出逐站一致的结果——
+**对照回归**（上线前必跑一次）：主从与单机对同一份清单应产出逐站一致的判定。
+固化成脚本 \`deploy/regress.sh\`（起 master→等就绪→放一台 both worker→等收口→单机重跑→逐站 diff）：
 
 \`\`\`sh
-bot master --from-api --limit 50 --format json > ms.json &      # 配一台 both worker 跑完退出
-bot run    --from-api --limit 50 --format json > run.json       # 同一清单单机再跑
-diff <(jq -S 'del(.evidence, .raw_ms)' -c run.json | sort) \
-     <(jq -S 'del(.evidence, .raw_ms)' -c ms.json  | sort)      # 期望只差渲染竞态导致的个别站
+MS_TOKEN=xxx BOT=./bot ./deploy/regress.sh 50
 \`\`\`
+
+依赖：能访问 api.travellings.cn（\`--from-api\` 免配 DB）、有可回退的无头 Chrome、jq。
+脚本里 worker 特意带 \`--browser-workers 4\`——纯 HTTP worker 会让 SPA 站 escalate 后永不收口
+（坑①，本机实测过）。diff 期望为空，或仅差个别渲染竞态站；大面积不一致 = 主从判定与单机分叉。
 
 ## 开发
 
