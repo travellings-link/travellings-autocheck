@@ -8,6 +8,7 @@ package master
 import (
 	"context"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,11 +36,18 @@ func laneIdx(l mspb.Lane) int {
 	return -1
 }
 
-// siteState 记一个站在两条腿上被派发过几次，用于重试预算。
+// siteState 记一个站在两条腿上被派发过几次，用于重试预算与租约回收。
 type siteState struct {
 	httpDisp  int  // 被派进 HTTP 队列并领走的次数
 	brDisp    int  // 被派进 Browser 队列并领走的次数
 	escalated bool // 是否已因 Escalate 转过一次 Browser（HTTP 初判→渲染复核）
+	recycles  int  // 已因租约超时回收重派的次数（防 worker 反复死导致的无限循环）
+
+	// 租约（§3 已派发未响应哈希表）。leased=0 表示该站当前不在途。
+	url     string
+	name    string
+	leased  int8      // 当前在途腿：0=无、1=HTTP、2=Browser
+	leaseAt time.Time // 该腿被领走的时刻
 }
 
 // Round 是一次巡查轮 master 的全部状态（MS_TASK §3 四结构），纯内存、轮末即焚（D4）。
@@ -48,6 +56,11 @@ type Round struct {
 
 	token string
 	batch int // >0 封顶单次派发（测试用）；0 由 worker want 决定（D10）
+
+	// 租约时长（D11，按腿）。<=0 = 该腿不回收（不调 SetLease 时的安全默认，
+	// 确保未接线的运行/测试行为零变化）。
+	leaseHTTP, leaseBrowser time.Duration
+	now                     func() time.Time // 时钟，测试可注入假时钟
 
 	mu        sync.Mutex
 	queue     [2][]*mspb.Task // 0=HTTP 待派发、1=Browser 待派发
@@ -65,17 +78,35 @@ type Round struct {
 // NewRound 建一轮：seed 灌入 HTTP 待派发队列（本轮清单，D13 只走 DB / M1 支持 --from-api）。
 func NewRound(token string, seed []*mspb.Task, batch int) *Round {
 	q := make([]*mspb.Task, 0, len(seed)) // cap 预分配；用 len 会塞进 nil 任务（测试实测踩过）
-	r := &Round{token: token, batch: batch, sites: make(map[int32]*siteState), final: make([]*mspb.Verdict, 0, len(seed))}
+	r := &Round{
+		token: token, batch: batch,
+		sites: make(map[int32]*siteState),
+		final: make([]*mspb.Verdict, 0, len(seed)),
+		now:   time.Now,
+	}
 	for _, t := range seed {
 		if t == nil {
 			continue
 		}
 		q = append(q, t)
-		r.sites[t.GetId()] = &siteState{}
+		r.sites[t.GetId()] = &siteState{url: t.GetUrl(), name: t.GetName()}
 	}
 	r.total = len(q)
 	r.queue[0] = q
 	return r
+}
+
+// OnClose 在收口瞬间触发一次（M2 在此接闸门→写库→通知；须 NewRound 后、Serve 前设置；
+// 回调在独立 goroutine 执行，不持 r.mu）。
+func (r *Round) OnClose(f func()) { r.onClose = f }
+
+// SetLease 设定两腿租约时长与可选时钟（mscmd 在 Serve 前调用；测试注入假时钟）。
+// d<=0 的腿不参与回收。未调用则两腿都=0、永不回收（默认安全）。
+func (r *Round) SetLease(httpLease, browserLease time.Duration, now func() time.Time) {
+	r.leaseHTTP, r.leaseBrowser = httpLease, browserLease
+	if now != nil {
+		r.now = now
+	}
 }
 
 func (r *Round) checkToken(ctx context.Context) error {
@@ -91,6 +122,16 @@ func (r *Round) checkToken(ctx context.Context) error {
 }
 
 func (r *Round) closedLocked() bool { return r.responded >= r.total }
+
+// fireCloseLocked：首次观察到收口时异步触发 OnClose（不持锁执行回调，避免与
+// srv.Stop 死锁）。调用方须持锁。
+func (r *Round) fireCloseLocked() {
+	if r.closedLocked() && r.onClose != nil && !r.closedFired {
+		f := r.onClose
+		r.closedFired = true
+		go f()
+	}
+}
 
 // Pull：worker 按腿领一批。
 //   - 已收口 → ROUND_DONE（D7，唯一退出信号）
@@ -126,6 +167,7 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 	out := &mspb.PullResponse{Action: mspb.Action_ASSIGN, Tasks: make([]*mspb.Task, n)}
 	copy(out.Tasks, q[:n])
 	r.queue[i] = q[n:]
+	at := r.now()
 	for _, t := range out.Tasks {
 		if s := r.sites[t.GetId()]; s != nil {
 			if i == 0 {
@@ -133,6 +175,8 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 			} else {
 				s.brDisp++
 			}
+			s.leased = int8(i + 1) // 登记租约：该站在途，超时由 Reclaim 回收
+			s.leaseAt = at
 		}
 	}
 	return out, nil
@@ -140,10 +184,6 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 
 // Report：worker 逐条回传（提案口径：不等整批攒齐）。master 在此做路由/重试决策。
 // 关键：escalate / retry 都是「回灌对应队列」，worker 侧不自己处理（用户铁律）。
-// OnClose 在收口瞬间触发一次（M2 在此接闸门→写库→通知；M1 只用于停进度、优雅退出）。
-// 须在 NewRound 后、Serve 前设置；回调在独立 goroutine 执行，不持 r.mu。
-func (r *Round) OnClose(f func()) { r.onClose = f }
-
 func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.ReportResponse, error) {
 	if err := r.checkToken(ctx); err != nil {
 		return nil, err
@@ -162,45 +202,103 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 	s := r.sites[v.GetSiteId()]
 	if s == nil {
 		// 未知站：可能是回收后重复回传或注入。计数丢弃，不拖垮收口。
-		return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
+	// 租约状态机防重复/防迟到：该站当前必须「就在这条腿在途」才认账。
+	// 覆盖 kill-worker 场景——被回收（leased=0）后老 worker 的迟到回传直接丢弃，
+	// 不会重复 responded。已知窄窗：回收并「同腿」重派后老 worker 才回传会误认，
+	// 需 per-dispatch token 才能彻底消除；本环境租约 >> 单请求预算，该窗口实际不发生。
+	// ponytail: 迟到去重的精确 token（proto attempt 回填）留待 M4c 全链路一并验证。
+	if s.leased != int8(i+1) {
+		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
+	}
+	s.leased = 0 // 认账即撤销在途租约
 	// 已知站的有效回传：无论后续走终结/重试/升级，都计入进度「所有任务」分子。
 	r.reports++
 
 	// IGNORE（工具链/站点超时）——只可能在 Browser 腿出现，回 Browser 队列重试 ≤5。
 	if v.GetInfraErr() != "" || v.GetNavTimeout() != "" {
 		if s.brDisp-1 < retryIgnore { // brDisp-1 = 已重试次数（首次不算重试）
-			r.queue[1] = append(r.queue[1], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl()})
-			return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+			r.queue[1] = append(r.queue[1], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
+			return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 		}
 		r.responded++ // 预算耗尽：按 IGNORE 终结（M2 起不写库）
 		r.final = append(r.final, v)
-		return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
 
 	// 升级（SPA/非确定错误）：escalate=true 且尚未升级过 → 转 Browser 队列。
 	if v.GetEscalate() && !s.escalated {
 		s.escalated = true
-		r.queue[1] = append(r.queue[1], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl()})
-		return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+		r.queue[1] = append(r.queue[1], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
+		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
 
 	// HTTP 腿提前断言的 ERROR/TIMEOUT → 回 HTTP 队列重试 ≤1。
 	if i == 0 && (v.GetStatus() == "ERROR" || v.GetStatus() == "TIMEOUT") {
 		if s.httpDisp-1 < retryTransient {
-			r.queue[0] = append(r.queue[0], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl()})
-			return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+			r.queue[0] = append(r.queue[0], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
+			return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 		}
 	}
 
 	// 其余（RUN / LOST 终判 / 裸 HTTP 码 / 预算耗尽的 ERROR/TIMEOUT）→ 终结。
 	r.responded++
 	r.final = append(r.final, v)
-	return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+	return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
+}
+
+// Reclaim 扫描在途租约，把「领走后超时未回传」的任务回收（提案承诺的哈希表兜底）。
+// 由 masterCmd 的后台 ticker 按小于最短租约的间隔驱动。返回本轮回收数。
+//   - 未超租约预算：回灌对应待派队列（等别的 worker 重领）；
+//   - 超预算（worker 反复死）：按不写库终结（InfraErr 标记），防单站无限回收拖垮收口。
+func (r *Round) Reclaim(now time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reclaimed := 0
+	for id, s := range r.sites {
+		if s.leased == 0 {
+			continue
+		}
+		lane := int(s.leased) - 1
+		lease := r.leaseHTTP
+		if lane == 1 {
+			lease = r.leaseBrowser
+		}
+		if lease <= 0 || now.Sub(s.leaseAt) < lease {
+			continue
+		}
+		s.leased = 0
+		s.recycles++
+		budget := retryTransient
+		if lane == 1 {
+			budget = retryIgnore
+		}
+		if s.recycles > budget {
+			// 反复没人做成：按不写库终结，收口才能推进（D12：master 无 deadline，靠此兜底）。
+			st := check.Raw
+			if lane == 1 {
+				st = check.JS
+			}
+			r.final = append(r.final, &mspb.Verdict{
+				SiteId: id, Name: s.name, Url: s.url,
+				Status: string(check.Error), Stage: string(st),
+				Evidence: "lease timeout: worker 领走后未响应",
+				InfraErr: "lease timeout: worker 领走后未响应",
+			})
+			r.responded++
+		} else {
+			r.queue[lane] = append(r.queue[lane], &mspb.Task{Id: id, Url: s.url, Name: s.name})
+		}
+		reclaimed++
+	}
+	if reclaimed > 0 {
+		r.fireCloseLocked() // 若因回收终结凑齐收口，触发轮末退出
+	}
+	return reclaimed
 }
 
 // Verdicts 返回本轮终判快照（已响应队列）。收口后由轮末逻辑读取转写库。
-// 拷贝返回：调用方拿到的是不可变视图，不受后续 Report 影响。
 func (r *Round) Verdicts() []*mspb.Verdict {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -210,22 +308,15 @@ func (r *Round) Verdicts() []*mspb.Verdict {
 }
 
 // assignOrDoneLocked：收口了就发哨兵，否则让 worker 继续拉。调用方持锁。
-// 首次观察到收口时异步触发 OnClose（不持锁执行，避免与 srv.Stop 死锁）。
-func assignOrDoneLocked(r *Round) mspb.Action {
+func (r *Round) assignOrDoneLocked() mspb.Action {
 	if r.closedLocked() {
-		if r.onClose != nil && !r.closedFired {
-			f := r.onClose
-			r.closedFired = true
-			go f()
-		}
+		r.fireCloseLocked()
 		return mspb.Action_ROUND_DONE
 	}
 	return mspb.Action_ASSIGN
 }
 
 // Snapshot 供进度条读，两条腿各自「已派发 / 累计任务数」+ 累计回传。
-// 口径 = 需求原话：分子「已派出去」= 该腿累计派发；分母「累计任务」= 已派出去 + 还没派出去的（队列剩余）。
-// 升级/重试回灌会让分母随新增派发增长（重试也算一次派发），符合「本轮迄今产生过多少任务」。
 func (r *Round) Snapshot() (httpDisp, httpTotal, brDisp, brTotal, reports int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

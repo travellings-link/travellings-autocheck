@@ -119,6 +119,20 @@ func masterCmd() *cobra.Command {
 			round := master.NewRound(c.Token, tasks, 0)
 			t0 := time.Now()
 
+			// 租约（D11，按腿公式，flag 可覆盖）：HTTP = timeout×3；
+			// Browser = (js-settle + timeout)×(1+render-retries) + 10s 缓冲。
+			// 租约 >> worker 单任务预算是设计前提：正常慢不会误回收。
+			httpLease := c.ReclaimHTTP
+			if httpLease <= 0 {
+				httpLease = time.Duration(c.TimeoutMS) * 3 * time.Millisecond
+			}
+			brLease := c.ReclaimBrowser
+			if brLease <= 0 {
+				brLease = time.Duration(c.JSSettleMS+c.TimeoutMS)*time.Millisecond*
+					time.Duration(1+c.RenderRetries) + 10*time.Second
+			}
+			round.SetLease(httpLease, brLease, nil)
+
 			// 三行进度（爬取/渲染/所有任务）复用 run 的同一组件；仅 TTY 且非 -v 生效。
 			prog := newMasterProgress(round.Snapshot, verbose)
 			progStop := make(chan struct{})
@@ -146,7 +160,30 @@ func masterCmd() *cobra.Command {
 				<-ctx.Done()
 				srv.GracefulStop()
 			}()
+			// 后台回收扫描：间隔取最短租约的一半（够密即可，别空转烧 CPU）。
+			interval := httpLease
+			if brLease < interval {
+				interval = brLease
+			}
+			if interval > 30*time.Second {
+				interval = 30 * time.Second
+			}
+			go func() {
+				tk := time.NewTicker(interval)
+				defer tk.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-tk.C:
+						if n := round.Reclaim(time.Now()); n > 0 {
+							log.Warn().Int("reclaimed", n).Msg("租约到期的任务已回收重派/终结")
+						}
+					}
+				}
+			}()
 			log.Info().Str("listen", c.Listen).Int("tasks", len(tasks)).
+				Dur("lease_http", httpLease).Dur("lease_browser", brLease).
 				Bool("from_api", c.FromAPI).Bool("dry_run", c.DryRun || !c.Write).
 				Msg("master 已就绪")
 			err = srv.Serve(lis)
