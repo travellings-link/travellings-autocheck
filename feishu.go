@@ -79,17 +79,11 @@ type tableColumn struct {
 	Format          map[string]any `json:"format,omitempty"`
 }
 
-type optCell struct {
-	Text  string `json:"text"`
-	Color string `json:"color"`
-}
-
 type tableRow struct {
-	ID       int       `json:"ids"`
-	Name     string    `json:"name"`
-	URL      string    `json:"url"`
-	Category []optCell `json:"category"`
-	Error    string    `json:"error"`
+	ID    int    `json:"ids"`
+	Name  string `json:"name"`
+	URL   string `json:"url"`
+	Error string `json:"error"`
 }
 
 type tableElement struct {
@@ -114,23 +108,6 @@ type feishuCard struct {
 	Config map[string]any `json:"config"`
 	Header cardHeader     `json:"header"`
 	Body   map[string]any `json:"body"`
-}
-
-// categoryFor 给问题站点的「错误分类」列定标签与颜色。
-func categoryFor(v pipeline.Verdict) optCell {
-	if isIgnore(v) {
-		return optCell{Text: "IGNORE", Color: "turquoise"}
-	}
-	switch string(v.Status) {
-	case string(check.Lost):
-		return optCell{Text: "LOST", Color: "orange"}
-	case string(check.Error):
-		return optCell{Text: "ERROR", Color: "red"}
-	case string(check.Timeout):
-		return optCell{Text: "TIMEOUT", Color: "carmine"}
-	default:
-		return optCell{Text: "HTTP " + string(v.Status), Color: "violet"}
-	}
 }
 
 // buildFeishuCard 生成巡查报告卡片：柱图看分布、明细表给原因。
@@ -188,10 +165,12 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		ColorTheme: "brand", Height: "auto", Margin: "0px 0px 0px 0px",
 	}
 
-	// 明细行：可信 RUN 不进表；其余按 ID 排序
+	// 明细表只列**未被自动归类识别的工具链错误**（InfraErr：CDP 断连、浏览器崩溃、
+// target 丢失这类落不进「站点慢/站点坏了」的错误）。站点侧问题（LOST/ERROR/
+// HTTP 码/站点超时）不进表——它们的结论已写在库和终端报告里，塞进群只是噪声。
 	rows := make([]tableRow, 0, len(vs))
 	for _, v := range vs {
-		if v.Status == check.Run && !isIgnore(v) {
+		if v.InfraErr == "" {
 			continue
 		}
 		name := v.Name
@@ -200,8 +179,7 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		}
 		rows = append(rows, tableRow{
 			ID: v.SiteID, Name: name, URL: v.URL,
-			Category: []optCell{categoryFor(v)},
-			Error:    truncate(strings.ReplaceAll(v.Evidence, "\n", " "), 120),
+			Error: truncate(strings.ReplaceAll(v.InfraErr, "\n", " "), 120),
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
@@ -210,11 +188,15 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		Tag:     "markdown",
 		Content: fmt.Sprintf("巡查 **%d** 站 · 用时 %s · RUN 占比 **%s%%**", total, elapsed.Round(time.Second), strconv.FormatFloat(runPct, 'f', 1, 64)),
 		Margin:  "0px 0px 0px 0px",
-	}, cardElement{Tag: "hr", Margin: "0px 0px 0px 0px"}}
+	}}
 
-	if len(rows) == 0 {
-		elements = append(elements, cardElement{Tag: "markdown", Content: "本轮无问题站点", Margin: "0px 0px 0px 0px"})
-	} else {
+
+	// 有未归类的工具链错误才出表格；没有就整段消失（含分隔线）
+	if len(rows) > 0 {
+		elements = append(elements,
+			cardElement{Tag: "hr", Margin: "0px 0px 0px 0px"},
+			cardElement{Tag: "markdown", Content: fmt.Sprintf("以下 %d 个站点的失败**未被自动归类识别**，疑似工具链问题（本轮结论未写库）：", len(rows)), Margin: "0px 0px 0px 0px"},
+		)
 		shown := rows
 		if len(shown) > feishuMaxRows {
 			shown = shown[:feishuMaxRows]
@@ -225,7 +207,6 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 				{DataType: "number", Name: "ids", DisplayName: "网站 ID", HorizontalAlign: "right", VerticalAlign: "bottom", Width: "auto", Format: map[string]any{"precision": 0}},
 				{DataType: "text", Name: "name", DisplayName: "网站名称", HorizontalAlign: "left", Width: "auto"},
 				{DataType: "text", Name: "url", DisplayName: "网站链接", HorizontalAlign: "left", Width: "auto"},
-				{DataType: "options", Name: "category", DisplayName: "错误分类", HorizontalAlign: "left", Width: "auto"},
 				{DataType: "text", Name: "error", DisplayName: "错误原因", HorizontalAlign: "left", Width: "auto"},
 			},
 			Rows: shown, RowHeight: "low",
@@ -234,15 +215,11 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		})
 		if len(rows) > feishuMaxRows {
 			elements = append(elements, cardElement{Tag: "markdown",
-				Content: fmt.Sprintf("问题站点共 %d 个，仅展示前 %d 条；完整清单见运行日志或 --format json", len(rows), feishuMaxRows),
+				Content: fmt.Sprintf("未归类工具链错误共 %d 条，仅展示前 %d 条；完整清单见运行日志或 --format json", len(rows), feishuMaxRows),
 				Margin:  "0px 0px 0px 0px",
 			})
 		}
 	}
-
-	// 标题色只回答一个问题：本轮结果实际进库了没有。
-	// green=已写入；red=未写入（dry-run / 中断 / 闸门丢弃 / 写库失败，不分原因）。
-	// 运维在群里扫一眼就知道要不要去补跑，而不是猜几分算健康。
 	template := "red"
 	if written {
 		template = "green"

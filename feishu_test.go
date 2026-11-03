@@ -46,10 +46,10 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 
 	vs := []pipeline.Verdict{
 		{SiteID: 1, Status: check.Run, Name: "khbit", URL: "https://khbit.cn"},
-		{SiteID: 2, Status: check.Run, Name: "wayjam", URL: "https://wayjam.me"},
 		{SiteID: 3, Status: check.Lost, Name: "example", URL: "https://example.com"},
 		{SiteID: 4, Status: check.Verdict("403"), Name: "spa", URL: "https://lakeus.example"},
-		{SiteID: 5, Status: check.Timeout, NavTimeout: "nav timeout", Name: "slow", URL: "https://slow.example"}, // IGNORE
+		{SiteID: 5, Status: check.Timeout, NavTimeout: "nav timeout", Name: "slow", URL: "https://slow.example"},
+		{SiteID: 9, Status: check.Error, InfraErr: "attach cdp: connection refused", Name: "brk", URL: "https://brk.example"},
 	}
 	if err := notifyFeishu(context.Background(), buildFeishuCard(vs, 37*time.Minute, true)); err != nil {
 		t.Fatalf("发送失败: %v", err)
@@ -67,15 +67,17 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 	if !strings.Contains(card, "\"HTTP\"") {
 		t.Fatalf("裸 HTTP 码应在图里合并为 HTTP 桶，得到: %s", card)
 	}
-	if strings.Contains(card, "40.0%") == false {
-		t.Fatalf("应展示 RUN 占比 40.0%%，得到: %s", card)
+	if !strings.Contains(card, "RUN 占比 **20.0%**") {
+		t.Fatalf("5 站 1 RUN 应得 20.0%%，得到: %s", card)
 	}
-	// 表格里不得出现 khbit / wayjam（可信 RUN 站被误判 IGNORE 的 5 号除外——它进表）
-	if strings.Contains(card, "khbit") || strings.Contains(card, "wayjam") {
-		t.Fatalf("RUN 站点不应进明细表，得到: %s", card)
+	// 明细表只进 InfraErr 站：khbit/wayjam/example/spa/slow（站点侧）都不进
+	for _, n := range []string{"khbit", "example.com", "spa", "slow"} {
+		if strings.Contains(card, "\"name\":\"" + n + "\"") {
+			t.Fatalf("非工具链错误站点 %s 不应进明细表，得到: %s", n, card)
+		}
 	}
-	if !strings.Contains(card, "example") || !strings.Contains(card, "slow") {
-		t.Fatalf("LOST/IGNORE 站点应进明细表，得到: %s", card)
+	if !strings.Contains(card, "brk") || !strings.Contains(card, "attach cdp") {
+		t.Fatalf("未归类工具链错误 brk 应进明细表，得到: %s", card)
 	}
 }
 
@@ -104,7 +106,7 @@ func TestFeishuTemplateReflectsWrite(t *testing.T) {
 func TestFeishuNoNoteElement(t *testing.T) {
 	vs := make([]pipeline.Verdict, 0, feishuMaxRows+5)
 	for i := 0; i < feishuMaxRows+5; i++ {
-		vs = append(vs, pipeline.Verdict{SiteID: i + 1, Status: check.Lost, Name: "x", URL: "https://x", Evidence: "no entry"})
+		vs = append(vs, pipeline.Verdict{SiteID: i + 1, Status: check.Error, InfraErr: "attach cdp", Name: "x", URL: "https://x"})
 	}
 	b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, false))
 	if strings.Contains(string(b), "\"note\"") {
@@ -129,11 +131,17 @@ func TestFeishuNonZeroCodeIsError(t *testing.T) {
 	t.Logf("按预期拒绝: %v", err)
 }
 
-// 全 RUN 的轮次：表格缺席但卡片仍要有 note（不炸空数组）
-func TestFeishuAllRunNoTable(t *testing.T) {
-	vs := []pipeline.Verdict{{SiteID: 1, Status: check.Run, Name: "a", URL: "https://a"}}
+// 没有未归类工具链错误 → 表格与引题、分隔线整段消失（哪怕站点侧问题成堆）。
+func TestFeishuTableOnlyWhenInfraUnlisted(t *testing.T) {
+	vs := []pipeline.Verdict{
+		{SiteID: 1, Status: check.Run, Name: "a", URL: "https://a"},
+		{SiteID: 2, Status: check.Lost, Name: "b", URL: "https://b"},
+		{SiteID: 3, Status: check.Timeout, NavTimeout: "nav timeout", Name: "c", URL: "https://c"},
+		{SiteID: 4, Status: check.Verdict("503"), Name: "d", URL: "https://d"},
+	}
 	b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, false))
-	if !strings.Contains(string(b), "本轮无问题站点") {
-		t.Fatalf("全 RUN 轮应给出无问题提示: %s", b)
+	s := string(b)
+	if strings.Contains(s, "\"table\"") || strings.Contains(s, "未被自动归类识别") {
+		t.Fatalf("无 InfraErr 时不应出表格，得到: %s", s)
 	}
 }
