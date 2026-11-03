@@ -44,3 +44,17 @@ func Write(d *gorm.DB, verdicts []pipeline.Verdict) error {
 	pkglog.Info().Int("sites", len(ups)).Msg("已写回")
 	return nil
 }
+
+// FinishRound 是轮末写库的完整决策：--limit 轮跳过占比闸门直写（调试/灰度语义），
+// 全量轮走 Finalize。bot run 与 bot master 各调一次，旁路逻辑不再两份（D1）。
+// 日志措辞与抽取前 runOnce 逐字一致。
+func FinishRound(d *gorm.DB, verdicts []pipeline.Verdict, minPct float64, limit int) (written bool, err error) {
+	if limit > 0 {
+		pkglog.Info().Int("limit", limit).Msg("--limit 生效，跳过占比闸门")
+		if err := Write(d, verdicts); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return Finalize(d, verdicts, minPct)
+}

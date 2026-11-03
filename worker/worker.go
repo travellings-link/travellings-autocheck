@@ -100,7 +100,7 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 				if ln == mspb.Lane_LANE_HTTP {
 					vr = judgeHTTP(ctx, o, t)
 				} else {
-					vr = &mspb.Verdict{SiteId: t.GetId(), Url: t.GetUrl(),
+					vr = &mspb.Verdict{SiteId: t.GetId(), Name: t.GetName(), Url: t.GetUrl(),
 						Status: "RUN", Stage: "js", Evidence: "m3-pending"}
 				}
 				rr, err := cli.Report(withToken(ctx, o.Token), &mspb.ReportRequest{Lane: ln, Verdict: vr})
@@ -137,6 +137,7 @@ func judgeHTTP(ctx context.Context, o Options, t *mspb.Task) *mspb.Verdict {
 	res := check.Evaluate(page, check.Raw)
 	return &mspb.Verdict{
 		SiteId:   t.GetId(),
+		Name:     t.GetName(),
 		Url:      t.GetUrl(),
 		Status:   string(res.Verdict),
 		Stage:    string(check.Raw),

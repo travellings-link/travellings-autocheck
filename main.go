@@ -194,6 +194,7 @@ func setupLog(verbose bool) *zerolog.Logger {
 	pipeline.SetLogger(l) // 管线内部（抓取/渲染/判定）的 debug 也走同一出口
 	crawl.SetLogger(l)    // crawl 包（CDP 回退等告警）也走同一出口
 	feishu.SetLogger(l)   // 跳过通知的 Debug 也走同一出口
+	report.SetLogger(l)   // 轮末闸门/写回的日志（RUN 占比、已写回）也走同一出口
 
 	// 接管标准库 log：net/http 等库在内部直接 log.Printf 写 os.Stderr
 	// （如 transport.go 的 "Unsolicited response received on idle HTTP channel"），
@@ -443,26 +444,13 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 	if d == nil {
 		return fmt.Errorf("内部错误：写库路径无数据库连接（FromAPI=%v）", cfg.FromAPI)
 	}
-	// 占比闸门(--limit 时禁用)。闸门+写回是 bot run 与 master 共用逻辑（report.Finalize），
-	// 此处只保留 --limit 的旁路：调试/灰度轮跳过占比、直接写回。
-	if cfg.Limit > 0 {
-		log.Info().Int("limit", cfg.Limit).Msg("--limit 生效，跳过占比闸门")
-		if err := report.Write(d, verdicts); err != nil {
-			notify(false)
-			return fmt.Errorf("write verdicts: %w", err)
-		}
-		notify(true)
-		return nil
-	}
-	written, err := report.Finalize(d, verdicts, cfg.MinPct)
-	if !written {
-		if err != nil {
-			notify(false)
-			return fmt.Errorf("write verdicts: %w", err)
-		}
+	// 轮末写库：limit 旁路/占比闸门/写回全在 report.FinishRound——与 bot master 共用
+	// 同一实现（D1，旁路逻辑不再两份），调用方只做通知与错误上抛。
+	written, ferr := report.FinishRound(d, verdicts, cfg.MinPct, cfg.Limit)
+	if ferr != nil {
 		notify(false)
-		return nil
+		return fmt.Errorf("write verdicts: %w", ferr)
 	}
-	notify(true)
+	notify(written)
 	return nil
 }

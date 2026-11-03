@@ -25,6 +25,7 @@ message Task {
   int32 id = 1;
   string url = 2;
   int32 attempt = 3; // 已渲染重试次数（仅 Browser 流用，master 侧计账）
+  string name = 4;  // 站点名（清单→worker→回传→报表/卡片展示，不参与判定）
 }
 
 // PullRequest：worker 上报自己的能力和想拉的数量（want=workers×1，D10 由 worker 推算）。

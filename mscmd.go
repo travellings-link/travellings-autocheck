@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"gorm.io/gorm"
 
 	"travellings-bot-go/db"
+	"travellings-bot-go/internal/feishu"
+	"travellings-bot-go/internal/report"
 	"travellings-bot-go/master"
 	"travellings-bot-go/pipeline"
 	mspb "travellings-bot-go/proto/mspb"
@@ -39,26 +43,36 @@ type workerConfig struct {
 // loadMasterTasks 取本轮清单：--from-api 走 api.travellings.cn（完全不碰 DB，
 // 便于本地测试），否则走 db.ListSites（含 30 天豁免，线上口径）。
 // 与 bot run 共用同一批函数，互斥契约也照搬：--from-api 与 --write 互斥。
-func loadMasterTasks(ctx context.Context, c masterConfig) ([]*mspb.Task, error) {
+//
+// 返回 db 连接供轮末写库（--from-api 时为 nil）：master 全程持有，取清单和写回用同一条。
+// 连接关闭由调用方（masterCmd）负责，避免取完清单即弃、轮末无库可写。
+func loadMasterTasks(ctx context.Context, c masterConfig) (*gorm.DB, []*mspb.Task, error) {
 	if c.FromAPI && c.Write {
-		return nil, fmt.Errorf("--from-api 与 --write 互斥：API 清单无行级上下文，不能写回")
+		return nil, nil, fmt.Errorf("--from-api 与 --write 互斥：API 清单无行级上下文，不能写回")
 	}
-	var sites []pipeline.Site
+	var (
+		sites []pipeline.Site
+		d     *gorm.DB
+	)
 	if c.FromAPI {
 		got, err := pipeline.FetchSitesFromAPI(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("fetch api sites: %w", err)
+			return nil, nil, fmt.Errorf("fetch api sites: %w", err)
 		}
 		sites = got
 		log.Info().Str("source", "api.travellings.cn").Msg("清单来源")
 	} else {
-		d, err := db.Open(c.Driver, c.SQLitePath, c.DSN)
+		var err error
+		d, err = db.Open(c.Driver, c.SQLitePath, c.DSN)
 		if err != nil {
-			return nil, fmt.Errorf("open db: %w", err)
+			return nil, nil, fmt.Errorf("open db: %w", err)
 		}
 		ws, err := db.ListSites(d, time.Now())
 		if err != nil {
-			return nil, fmt.Errorf("list sites: %w", err)
+			if sql, e := d.DB(); e == nil {
+				_ = sql.Close()
+			}
+			return nil, nil, fmt.Errorf("list sites: %w", err)
 		}
 		sites = make([]pipeline.Site, 0, len(ws))
 		for _, w := range ws {
@@ -71,36 +85,38 @@ func loadMasterTasks(ctx context.Context, c masterConfig) ([]*mspb.Task, error) 
 	}
 	tasks := make([]*mspb.Task, 0, len(sites))
 	for _, s := range sites {
-		tasks = append(tasks, &mspb.Task{Id: int32(s.ID), Url: s.URL})
+		tasks = append(tasks, &mspb.Task{Id: int32(s.ID), Url: s.URL, Name: s.Name})
 	}
-	return tasks, nil
+	return d, tasks, nil
 }
 
-// masterCmd：开 gRPC 服务 + token 握手（M1 骨架）。
-// M2 起在此接入：连 DB 取清单灌队列 → 路由/计数 → 轮末闸门写库 → 下发哨兵退出。
+// masterCmd：开 gRPC 服务、灌本轮清单、等 worker 拉取，收口后走轮末闸门写库+通知+哨兵。
+// 清单来源：默认 DB（30 天豁免）/ --from-api（本地测试）；写库复用 report.FinishRound（与 bot run 同一实现）。
 func masterCmd() *cobra.Command {
 	var c masterConfig
 	cmd := &cobra.Command{
 		Use:   "master",
-		Short: "主从模式 master：灌任务队列并等 worker 拉取（M1 为握手骨架）",
+		Short: "主从模式 master：灌任务队列、等 worker 拉取、收口后闸门写库+通知+哨兵",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if c.Token == "" {
 				return fmt.Errorf("--token 必填：worker 凭共享 token 接入（v1 无 TLS，仅限内网/隧道）")
 			}
-			tasks, err := loadMasterTasks(ctx, c)
+			d, tasks, err := loadMasterTasks(ctx, c)
 			if err != nil {
 				return err
 			}
 			if len(tasks) == 0 {
 				return fmt.Errorf("本轮清单为空（30 天豁免把站点全跳过了？还是 --limit 0 站）")
 			}
-			// M1 骨架：worker 回传的 verdict 只回哨兵状态，不做路由/计数/写库（M2–M4 接入）。
-			// 有人误给 --write 时必须说清楚，否则以为已经落盘。
-			if c.Write && !c.DryRun {
-				log.Warn().Msg("master M1 骨架：--write 尚未接入轮末写库（M2 生效），本轮不会落盘")
+			// DB 连接 master 全程持有（取清单与轮末写回同一条），结束即关。
+			if d != nil {
+				if sqlDB, derr := d.DB(); derr == nil {
+					defer func() { _ = sqlDB.Close() }()
+				}
 			}
 			round := master.NewRound(c.Token, tasks, 0)
+			t0 := time.Now()
 
 			// 三行进度（爬取/渲染/所有任务）复用 run 的同一组件；仅 TTY 且非 -v 生效。
 			prog := newMasterProgress(round.Snapshot, verbose)
@@ -131,10 +147,39 @@ func masterCmd() *cobra.Command {
 			}()
 			log.Info().Str("listen", c.Listen).Int("tasks", len(tasks)).
 				Bool("from_api", c.FromAPI).Bool("dry_run", c.DryRun || !c.Write).
-				Msg("master 已就绪（M1 握手骨架）")
+				Msg("master 已就绪")
 			err = srv.Serve(lis)
-			// 收口：本轮结束（或中断）时把进度推进到满格再收尾帧。
 			stopProg()
+			elapsed := time.Since(t0)
+
+			// 收口判定：Serve 返回后仍齐判 = 正常轮末；不齐只可能是 ^C 中断，
+			// 按既有契约「中断轮不写库」（D12：master 无内部 deadline，进程级交 systemd）。
+			// 未写库时不发 ROUND_DONE——在线 worker 继续重试，等下次 timer 开新轮。
+			if !round.Completed() {
+				log.Warn().Int("total", len(tasks)).Msg("巡查被中断，本轮结果不写库")
+				notifyFeishuMaster(ctx, round.ToVerdicts(), elapsed, false)
+				return err
+			}
+			vs := round.ToVerdicts()
+			report.Print(os.Stdout, vs, elapsed, false)
+
+			dry := c.DryRun || !c.Write
+			if dry {
+				log.Info().Msg("dry-run：未写库")
+				notifyFeishuMaster(ctx, vs, elapsed, false)
+				return err
+			}
+			if d == nil {
+				// 理论不可达：--from-api 与 --write 在取清单前已互斥。显式断言防放宽。
+				notifyFeishuMaster(ctx, vs, elapsed, false)
+				return fmt.Errorf("内部错误：写库路径无数据库连接（FromAPI=%v）", c.FromAPI)
+			}
+			written, ferr := report.FinishRound(d, vs, c.MinPct, c.Limit)
+			if ferr != nil {
+				notifyFeishuMaster(ctx, vs, elapsed, false)
+				return fmt.Errorf("write verdicts: %w", ferr)
+			}
+			notifyFeishuMaster(ctx, vs, elapsed, written)
 			return err
 		},
 	}
@@ -143,12 +188,12 @@ func masterCmd() *cobra.Command {
 }
 
 // workerCmd：连 master 跑拉流循环；连不上按 D8 无限重试（指数退避封顶 60s）。
-// M1 干的是假活（回传占位 verdict）；M2 起接 crawl.Raw/check.Evaluate 真抓取。
+// HTTP 初审腿走真实 crawl.Raw+check.Evaluate；Browser 渲染腿 crawl.Rendered 留 M3。
 func workerCmd() *cobra.Command {
 	var c workerConfig
 	cmd := &cobra.Command{
 		Use:   "worker",
-		Short: "主从模式 worker：从 master 拉任务并逐条回传（M1 为握手骨架）",
+		Short: "主从模式 worker：从 master 拉任务并逐条回传（HTTP 腿真实抓取）",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if c.Master == "" || c.Token == "" {
@@ -185,4 +230,14 @@ func workerCmd() *cobra.Command {
 	}
 	addWorkerFlags(cmd, &c)
 	return cmd
+}
+
+// notifyFeishuMaster 与 bot run 的 notify 闭包同语义：webhook 未配置静默跳过，
+// 标题色 = 本轮是否实际写库。卡片构建/发送复用 feishu 包，不复制。
+func notifyFeishuMaster(ctx context.Context, vs []pipeline.Verdict, elapsed time.Duration, written bool) {
+	if err := feishu.Notify(ctx, feishu.BuildCard(vs, elapsed, written)); err != nil {
+		log.Error().Err(err).Msg("飞书通知发送失败")
+	} else {
+		log.Info().Bool("written", written).Msg("飞书通知已发送")
+	}
 }

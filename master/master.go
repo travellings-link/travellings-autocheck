@@ -14,6 +14,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"travellings-bot-go/check"
+	"travellings-bot-go/pipeline"
 	mspb "travellings-bot-go/proto/mspb"
 )
 
@@ -238,3 +240,31 @@ func (r *Round) Snapshot() (httpDisp, httpTotal, brDisp, brTotal, reports int) {
 
 // Register 把一轮挂到 grpc 服务上，命令与测试共用同一份实现（D1 复用）。
 func Register(s grpc.ServiceRegistrar, r *Round) { mspb.RegisterCheckServer(s, r) }
+
+// Completed 报告本轮是否已收口（每个站都拿到终判）。masterCmd 据此决定写库/丢弃。
+func (r *Round) Completed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closedLocked()
+}
+
+// ToVerdicts 把终判集转成 []pipeline.Verdict——轮末 report.Finalize/Write/Print 与
+// feishu 的既有契约都按 pipeline.Verdict 定义，这里只做字段搬运，判定语汇不复制。
+func (r *Round) ToVerdicts() []pipeline.Verdict {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]pipeline.Verdict, 0, len(r.final))
+	for _, v := range r.final {
+		out = append(out, pipeline.Verdict{
+			SiteID:     int(v.GetSiteId()),
+			Name:       v.GetName(),
+			URL:        v.GetUrl(),
+			Status:     check.Verdict(v.GetStatus()),
+			Stage:      check.Stage(v.GetStage()),
+			Evidence:   v.GetEvidence(),
+			InfraErr:   v.GetInfraErr(),
+			NavTimeout: v.GetNavTimeout(),
+		})
+	}
+	return out
+}
