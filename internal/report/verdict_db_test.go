@@ -1,4 +1,4 @@
-package main
+package report
 
 import (
 	"testing"
@@ -15,7 +15,7 @@ func TestInfraErrorNotWrittenToDB(t *testing.T) {
 		{SiteID: 1, URL: "https://ok.example", Status: check.Run, Stage: check.JS, Evidence: "ok"},
 		{SiteID: 15, URL: "https://wznmickey.com", Status: check.Error, Stage: check.JS, Evidence: "infra js-leg: navigate timeout", InfraErr: "navigate timeout"},
 	}
-	ups := verdicts2updates(vs)
+	ups := Updates(vs)
 	if len(ups) != 1 {
 		t.Fatalf("infra 故障必须被跳过，期望 1 条，实际 %d 条", len(ups))
 	}
@@ -30,7 +30,7 @@ func TestAllInfraErrYieldsNoUpdates(t *testing.T) {
 		{SiteID: 1, Status: check.Error, InfraErr: "cdp down"},
 		{SiteID: 2, Status: check.Error, InfraErr: "timeout"},
 	}
-	if ups := verdicts2updates(vs); len(ups) != 0 {
+	if ups := Updates(vs); len(ups) != 0 {
 		t.Fatalf("全部 infra 故障时不应写库，实际 %d 条", len(ups))
 	}
 }

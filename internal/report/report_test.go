@@ -1,4 +1,4 @@
-package main
+package report
 
 import (
 	"bytes"
@@ -19,7 +19,7 @@ func TestPrintReportListsProblemSites(t *testing.T) {
 		{SiteID: 3, URL: "https://c.example", Status: check.Error, Stage: check.Raw, Evidence: "HTTP 403"},
 	}
 	var buf bytes.Buffer
-	printReport(&buf, vs, 1234*time.Millisecond, false)
+	Print(&buf, vs, 1234*time.Millisecond, false)
 	got := buf.String()
 
 	for _, want := range []string{"巡查完成", "3 站", "状态分布", "问题站点（2）", "https://b.example", "https://c.example"} {

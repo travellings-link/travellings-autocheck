@@ -1,4 +1,4 @@
-package main
+package report
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ func TestReportShowsIgnoreBucket(t *testing.T) {
 			Evidence: "infra js-leg: attach cdp failed", InfraErr: "attach cdp failed"},
 	}
 	var buf bytes.Buffer
-	printReport(&buf, vs, time.Second, false)
+	Print(&buf, vs, time.Second, false)
 	out := buf.String()
 
 	if !strings.Contains(out, "IGNORE 2") {
@@ -44,7 +44,7 @@ func TestReportNoIgnoreWhenClean(t *testing.T) {
 		{SiteID: 2, Status: check.Lost, Stage: check.JS},
 	}
 	var buf bytes.Buffer
-	printReport(&buf, vs, time.Second, false)
+	Print(&buf, vs, time.Second, false)
 	if strings.Contains(buf.String(), "IGNORE") {
 		t.Errorf("无 IGNORE 时不该出现该项：\n%s", buf.String())
 	}
