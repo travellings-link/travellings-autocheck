@@ -15,6 +15,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
+	"travellings-bot-go/check"
+	"travellings-bot-go/crawl"
 	mspb "travellings-bot-go/proto/mspb"
 )
 
@@ -24,6 +26,7 @@ type Options struct {
 	Token          string // pre-shared token（D6）
 	HTTPWorkers    int    // >0 拉 HTTP 流；同时 = HTTP 批次量（D5/D10）
 	BrowserWorkers int    // >0 拉 Browser 流；同时 = Browser 批次量
+	TimeoutMS      int    // HTTP 抓取单请求预算（crawl.Raw）
 	// Dialer 仅测试注入（bufconn 进程内），留空走默认 TCP。
 	Dialer func(ctx context.Context, addr string) (net.Conn, error)
 }
@@ -88,15 +91,19 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 				return n, nil // D7：本轮结束，丢弃在途、干净退出
 			}
 			for _, t := range pr.GetTasks() {
-				// M1：假干活（回传占位 verdict）。M2 起换成 crawl.Raw + check.Evaluate。
-				rr, err := cli.Report(withToken(ctx, o.Token), &mspb.ReportRequest{
-					Lane: ln,
-					Verdict: &mspb.Verdict{
-						SiteId: t.GetId(), Url: t.GetUrl(),
-						Status: "RUN", Stage: "raw",
-						Evidence: fmt.Sprintf("m1-fake lane=%v id=%d", ln, t.GetId()),
-					},
-				})
+				// 真实干活按腿分：HTTP 腿 crawl.Raw+check.Evaluate（M2）；
+				// Browser 腿 crawl.Rendered 留 M3。escalate 一律如实回传、交 master 路由
+				// （D14 铁律：worker 绝不原地升级）。
+				// ponytail: 此处串行逐条抓取——批次=workers×1 的并发语义 + D9 背压
+				// 随 M4 一起落地（并发才有「剩余<阈值再拉」的意义）；M2 只验判定/写库正确性。
+				var vr *mspb.Verdict
+				if ln == mspb.Lane_LANE_HTTP {
+					vr = judgeHTTP(ctx, o, t)
+				} else {
+					vr = &mspb.Verdict{SiteId: t.GetId(), Url: t.GetUrl(),
+						Status: "RUN", Stage: "js", Evidence: "m3-pending"}
+				}
+				rr, err := cli.Report(withToken(ctx, o.Token), &mspb.ReportRequest{Lane: ln, Verdict: vr})
 				if err != nil {
 					return n, fmt.Errorf("report id=%d: %w", t.GetId(), err)
 				}
@@ -117,4 +124,23 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// judgeHTTP 是 worker 的 HTTP 初审腿：与 bot run 的 Fetcher+Judge 用同一套
+// crawl.Raw / check.Evaluate，判定语汇逐字节对齐单机（MS_TASK §5，不复制实现）。
+func judgeHTTP(ctx context.Context, o Options, t *mspb.Task) *mspb.Verdict {
+	timeout := time.Duration(o.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	page := crawl.Raw(ctx, t.GetUrl(), timeout)
+	res := check.Evaluate(page, check.Raw)
+	return &mspb.Verdict{
+		SiteId:   t.GetId(),
+		Url:      t.GetUrl(),
+		Status:   string(res.Verdict),
+		Stage:    string(check.Raw),
+		Evidence: res.Evidence,
+		Escalate: res.Escalate, // 交 master 决定是否入 Browser 队列（D14）
+	}
 }

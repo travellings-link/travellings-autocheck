@@ -162,6 +162,7 @@ func workerCmd() *cobra.Command {
 				n, err := worker.RunOnce(ctx, worker.Options{
 					Master: c.Master, Token: c.Token,
 					HTTPWorkers: c.HTTPWorkers, BrowserWorkers: c.BrowserWorkers,
+					TimeoutMS: c.TimeoutMS,
 				})
 				if ctx.Err() != nil {
 					return ctx.Err()

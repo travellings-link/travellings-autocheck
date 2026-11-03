@@ -50,9 +50,11 @@ type Round struct {
 	mu        sync.Mutex
 	queue     [2][]*mspb.Task // 0=HTTP 待派发、1=Browser 待派发
 	sites     map[int32]*siteState
-	responded int // 已终结的站数
-	reports   int // 累计有效回传次数（进度「所有任务」分子，含重试各计一次）
-	total     int // 本轮站点总数
+	responded int             // 已终结的站数
+	reports   int             // 累计有效回传次数（进度「所有任务」分子，含重试各计一次）
+	total     int             // 本轮站点总数
+	final     []*mspb.Verdict // 已响应队列：本轮终判集（MS_TASK §3），收口后供轮末写库
+	// 存指针不存值：protoimpl.MessageState 含 mutex，按值拷贝会踩 vet copylocks
 
 	onClose     func() // 收口回调（见 OnClose）
 	closedFired bool   // 回调只触发一次
@@ -61,7 +63,7 @@ type Round struct {
 // NewRound 建一轮：seed 灌入 HTTP 待派发队列（本轮清单，D13 只走 DB / M1 支持 --from-api）。
 func NewRound(token string, seed []*mspb.Task, batch int) *Round {
 	q := make([]*mspb.Task, 0, len(seed)) // cap 预分配；用 len 会塞进 nil 任务（测试实测踩过）
-	r := &Round{token: token, batch: batch, sites: make(map[int32]*siteState)}
+	r := &Round{token: token, batch: batch, sites: make(map[int32]*siteState), final: make([]*mspb.Verdict, 0, len(seed))}
 	for _, t := range seed {
 		if t == nil {
 			continue
@@ -170,6 +172,7 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 			return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
 		}
 		r.responded++ // 预算耗尽：按 IGNORE 终结（M2 起不写库）
+		r.final = append(r.final, v)
 		return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
 	}
 
@@ -190,7 +193,18 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 
 	// 其余（RUN / LOST 终判 / 裸 HTTP 码 / 预算耗尽的 ERROR/TIMEOUT）→ 终结。
 	r.responded++
+	r.final = append(r.final, v)
 	return &mspb.ReportResponse{Action: assignOrDoneLocked(r)}, nil
+}
+
+// Verdicts 返回本轮终判快照（已响应队列）。收口后由轮末逻辑读取转写库。
+// 拷贝返回：调用方拿到的是不可变视图，不受后续 Report 影响。
+func (r *Round) Verdicts() []*mspb.Verdict {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*mspb.Verdict, len(r.final))
+	copy(out, r.final)
+	return out
 }
 
 // assignOrDoneLocked：收口了就发哨兵，否则让 worker 继续拉。调用方持锁。

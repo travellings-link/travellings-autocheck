@@ -132,3 +132,38 @@ func TestSnapshotProgressAccounting(t *testing.T) {
 		t.Fatalf("收口: browser=%d/%d rep=%d", bdp, btp, rep)
 	}
 }
+
+// 已响应队列 = 终判集（MS_TASK §3）：只有终结的站进 Verdicts()，
+// escalate/重试的中间回传不进，且拷贝返回不受后续回传影响。
+func TestVerdictsTerminalOnly(t *testing.T) {
+	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1"}, {Id: 2, Url: "u2"}}, 0)
+	r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+	r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+	// 1 号 escalate：不终结，不该进 final。
+	r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
+		Verdict: &mspb.Verdict{SiteId: 1, Status: "LOST", Escalate: true}})
+	if got := r.Verdicts(); len(got) != 0 {
+		t.Fatalf("escalate 不该终结: final=%d", len(got))
+	}
+	// 2 号 RUN：终结 → 进 final 一条，且收口发哨兵。
+	rr, _ := r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
+		Verdict: &mspb.Verdict{SiteId: 2, Status: "RUN", Stage: "raw"}})
+	fs := r.Verdicts()
+	// 1 号 escalate 后浏览器队列还有活，responded 只到 1（2 号），未收口。
+	if len(fs) != 1 || fs[0].GetSiteId() != 2 {
+		t.Fatalf("final 应只含终结的 2 号: %d 条", len(fs))
+	}
+	if rr.GetAction() != mspb.Action_ASSIGN {
+		t.Fatalf("1 号仍在浏览器腿待判，未收口，want ASSIGN got %v", rr.GetAction())
+	}
+	// 1 号浏览器腿出 RUN 终判 → 收口，final 两条。
+	r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_BROWSER, Want: 1})
+	rr2, _ := r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_BROWSER,
+		Verdict: &mspb.Verdict{SiteId: 1, Status: "RUN", Stage: "js"}})
+	if rr2.GetAction() != mspb.Action_ROUND_DONE {
+		t.Fatalf("两站齐了应收口哨兵, got %v", rr2.GetAction())
+	}
+	if got := r.Verdicts(); len(got) != 2 {
+		t.Fatalf("收口 final 应 2 条, got %d", len(got))
+	}
+}
