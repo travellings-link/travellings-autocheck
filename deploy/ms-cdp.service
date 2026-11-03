@@ -1,0 +1,12 @@
+# CDP 后端（Obscura）独立常驻 unit，供带 browser 能力的 worker 连。
+[Unit]
+Description=Obscura CDP server (for ms workers)
+
+[Service]
+# --workers 与 --worker-max-rss 按机器调整；应 ≥ 各 worker --browser-workers 之和
+ExecStart=/usr/local/bin/obscura serve --workers 8 --worker-max-rss 1024 --quiet
+Restart=always
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -31,6 +31,7 @@ type masterConfig struct {
 	RenderRetries, TimeoutMS, JSSettleMS, Limit int
 	Write, DryRun, FromAPI                      bool
 	MinPct                                      float64
+	Format                                      string // table|json（json 供与 bot run 逐站对照 diff）
 }
 
 // workerConfig 是 bot worker 的参数集（D5/D9/D10）。
@@ -199,7 +200,14 @@ func masterCmd() *cobra.Command {
 				return err
 			}
 			vs := round.ToVerdicts()
-			report.Print(os.Stdout, vs, elapsed, false)
+			// 输出与 bot run 同款分流：json 逐站一行（对照回归按 id diff），table 给人看。
+			if c.Format == "json" {
+				if err := report.WriteJSON(vs); err != nil {
+					return err
+				}
+			} else {
+				report.Print(os.Stdout, vs, elapsed, false)
+			}
 
 			dry := c.DryRun || !c.Write
 			if dry {

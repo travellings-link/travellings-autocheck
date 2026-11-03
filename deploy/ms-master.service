@@ -1,0 +1,16 @@
+# bot master：由 timer 调起、跑完一轮即退出（D2/D4：非常驻、纯内存轮末即焚）。
+# DB 凭据只在 master 侧（D3）。--write 才落库；去掉即 dry-run。
+[Unit]
+Description=Travellings autocheck master (pull-mode)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ms-master.env
+ExecStart=/usr/local/bin/bot master --listen 127.0.0.1:9500 --write --driver mysql --log-file "/root/travellings-ms-master.log"
+# D12：master 无内部 deadline，进程级兜底交 systemd —— 到点 systemd 直接 kill，
+# 语义等价现有「^C 中断轮不写库」：本轮作废、等下次 timer，数据不脏。留足全量一轮时间。
+TimeoutStartSec=3600
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

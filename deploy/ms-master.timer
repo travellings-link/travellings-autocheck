@@ -1,0 +1,10 @@
+# master 的调起节奏，沿用单机 autocheck.timer 的口径（每日 04:00）。
+[Unit]
+Description=Daily Travellings autocheck master
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

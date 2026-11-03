@@ -47,6 +47,7 @@ func addMasterFlags(cmd *cobra.Command, c *masterConfig) {
 	f.BoolVar(&c.FromAPI, "from-api", false, "站点清单取自 api.travellings.cn，完全不碰数据库（本地测试；与 --write 互斥）")
 	f.IntVar(&c.Limit, "limit", 0, "本次最多巡查站数，0 表示全量（调试/灰度用）")
 	f.Float64Var(&c.MinPct, "min-run-percentage", 50, "低于该 RUN 占比则丢弃本轮结果，不写库")
+	f.StringVar(&c.Format, "format", "table", "输出格式：table 人类可读，json 逐站一行（与 bot run 同 schema，对照回归用）")
 }
 
 // addWorkerFlags 注册 worker 参数（D5/D9/D10：能力即批次、背压阈值参数化）。

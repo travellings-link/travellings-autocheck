@@ -1,0 +1,16 @@
+# bot worker：也被 timer 拉起（D8），起来后无限重试直到连上 master，干活收 ROUND_DONE 哨兵后
+# exit 0（D7），等下一次 timer。必须至少有一台带 --browser-workers 的 worker，
+# 否则 SPA 站 escalate 后无渲染节点消化、本轮永不收口（见 README 主从部署）。
+[Unit]
+Description=Travellings autocheck worker (pull-mode)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ms-worker.env
+# 这台既是 HTTP 初审也是渲染节点；纯 HTTP 小机器把 --browser-workers 设 0 即可。
+ExecStart=/usr/local/bin/bot worker --master ms.internal:9500 --http-workers 20 --browser-workers 4 --cdp-url ws://127.0.0.1:9222/devtools/browser --log-file "/root/travellings-ms-worker.log"
+# D8：worker 起来后无限重试连 master，绝不能被 TimeoutStartSec 掐在重试等待里 —— 不设，或设到大于一个轮询周期。
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

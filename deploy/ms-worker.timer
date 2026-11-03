@@ -1,0 +1,10 @@
+# worker 的 timer 应略早于 master，或同刻起后自行重试等待（D8 无限重试覆盖这点）。
+[Unit]
+Description=Daily Travellings autocheck worker
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
