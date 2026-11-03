@@ -41,6 +41,12 @@ type Verdict struct {
 	NavTimeout string
 }
 
+// Ignored 判断该条判定是否属于"不写库"：结论可信度不足
+// （我方工具链故障 InfraErr 或站点超时 NavTimeout），既不写库
+// 也不该混进正常的 ERROR/TIMEOUT 统计。原先散在 main.isIgnore，
+// 收敛到数据自身供 report/feishu 共用（MS 重构，单一事实源）。
+func (v Verdict) Ignored() bool { return v.InfraErr != "" || v.NavTimeout != "" }
+
 // Options 是 run 管线参数（与 addRunFlags 注册的命令面一一对应）。
 type Options struct {
 	// HTTPWorkers 是 Fetcher 阶段的并发数。
