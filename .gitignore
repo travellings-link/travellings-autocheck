@@ -42,3 +42,6 @@ bot.exe
 /dist/
 
 autocheck-report.card
+
+# 主从改造任务书：本地协作草稿，不入库
+/MS_TASK.md

@@ -37,11 +37,12 @@ type progressView struct {
 	start     time.Time
 	lastDraw  time.Time
 	drawn     int
-	lastFrame []string       // 最近一帧，Suspend 后原样重画
-	suspended bool           // 正在让位给其他输出，期间禁止绘制
-	bar       progress.Model // bubbles 进度条模型
-	stopped   bool           // Finish 后禁止再画，防止 ticker 收尾竞态
-	done      chan struct{}  // Start 的 goroutine 退出信号
+	lastFrame []string                     // 最近一帧，Suspend 后原样重画
+	suspended bool                         // 正在让位给其他输出，期间禁止绘制
+	bar       progress.Model               // bubbles 进度条模型
+	stopped   bool                         // Finish 后禁止再画，防止 ticker 收尾竞态
+	done      chan struct{}                // Start 的 goroutine 退出信号
+	frameFn   func(now time.Time) []string // 帧覆盖钩子：非 nil 时 render 直接用它（master 侧复用同一组件）
 }
 
 // activeProg 指向当前正在画的进度条，供日志 writer 让位使用。
@@ -77,6 +78,28 @@ func newProgress(total int, stats *pipeline.StageStats, verbose bool) *progressV
 	p.bar = progress.New(
 		progress.WithDefaultGradient(),
 	)
+	return p
+}
+
+// newMasterProgress 给 bot master 画三条队列进度（爬取队列/渲染队列/所有任务）。
+// snap = master.Round.Snapshot：两腿各自的「累计派发/累计任务数(已派+待派)」+ 累计回传。
+// 分母会随重试回灌增长——「所有任务 400/1600」这种分母远大于首轮清单是设计口径。
+func newMasterProgress(snap func() (hd, ht, bd, bt, rep int), verbose bool) *progressView {
+	p := &progressView{
+		w:       os.Stderr,
+		enabled: useColorStderr() && !verbose, // 只在 TTY 且非 -v：与 run 同一开关口径
+		start:   time.Now(),
+	}
+	p.bar = progress.New(progress.WithDefaultGradient())
+	p.frameFn = func(now time.Time) []string {
+		hd, ht, bd, bt, rep := snap()
+		return []string{
+			colorizeTo(os.Stderr, cBold, "开往巡查 · 主从") + "  " + now.Sub(p.start).Round(time.Second).String(),
+			p.barLine("爬取队列", hd, ht, 8),
+			p.barLine("渲染队列", bd, bt, 8),
+			p.barLine("所有任务", rep, ht+bt, 8),
+		}
+	}
 	return p
 }
 
@@ -252,6 +275,10 @@ func (p *progressView) paint(frame []string) {
 }
 
 func (p *progressView) render(now time.Time) []string {
+	// master 侧走帧覆盖：三条队列进度复用 barLine，不重写组件（D1 复用）。
+	if p.frameFn != nil {
+		return p.frameFn(now)
+	}
 	fetched, judged, rendered, escalate, _ := p.stats.Snapshot()
 	elapsed := now.Sub(p.start)
 
@@ -317,6 +344,14 @@ func (p *progressView) statusLine() string {
 // 比手写 padDisplay 更可靠，也和报表的单元格排版保持一致。
 // 分母为 0 时条形留空并显示 "—"：渲染阶段在还没有升级任务前就是这个状态。
 func (p *progressView) stageLine(label string, done, total int) string {
+	// run 路径：标签定宽 6，与改造前逐字节一致（bot run 行为不变）。
+	return p.barLine(label, done, total, 6)
+}
+
+// barLine 画一行「标签 计数 条形」。width 是标签单元格宽度：
+// run 用 6（「总进度」「抓取」都是 2-3 字），master 用 8 容纳「爬取队列」这类 4 字标签。
+// 抽出来只为让 master 复用同一套排版，不给 run 增加任何行为差异。
+func (p *progressView) barLine(label string, done, total, width int) string {
 	pct := 0.0
 	if total > 0 {
 		pct = float64(done) / float64(total)
@@ -325,9 +360,9 @@ func (p *progressView) stageLine(label string, done, total int) string {
 		pct = 1
 	}
 
-	// 缩进 → 标签定宽 6 → 计数 → 组件渲染的「条形+百分比」。
+	// 缩进 → 标签定宽 → 计数 → 组件渲染的「条形+百分比」。
 	// 百分比交给 progress 组件（PercentFormat 控制），不再自己拼。
-	labelCell := stageStyle(label).Width(6).Render(label)
+	labelCell := stageStyle(label).Width(width).Render(label)
 	counts := "—"
 	if total > 0 {
 		counts = fmt.Sprintf("%d/%d", done, total)

@@ -1,0 +1,66 @@
+// 开往巡查主从架构 gRPC 接口（拉模式）。
+// 生成：protoc --proto_path=proto --go_out=. --go_opt=module=travellings-bot-go \
+//        --go-grpc_out=. --go-grpc_opt=module=travellings-bot-go proto/check.proto
+syntax = "proto3";
+
+package ms.v1;
+
+option go_package = "travellings-bot-go/proto/mspb";
+
+// Lane 是任务流：HTTP 初审与 Browser 渲染分开拉（提案原文口径）。
+enum Lane {
+  LANE_UNSPECIFIED = 0;
+  LANE_HTTP = 1;
+  LANE_BROWSER = 2;
+}
+
+// Action 是 master 对拉取/回传的应答意图。
+enum Action {
+  ASSIGN = 0;      // 正常派发，tasks 非空
+  ROUND_DONE = 1;  // 本轮结束哨兵（D7）：worker flush 在途、exit 0
+}
+
+// Task 是派发单元：只带 id+url（对齐现状渲染只传 URL，大 body 不上线）。
+message Task {
+  int32 id = 1;
+  string url = 2;
+  int32 attempt = 3; // 已渲染重试次数（仅 Browser 流用，master 侧计账）
+}
+
+// PullRequest：worker 上报自己的能力和想拉的数量（want=workers×1，D10 由 worker 推算）。
+message PullRequest {
+  Lane lane = 1;
+  int32 want = 2;
+}
+
+message PullResponse {
+  Action action = 1;
+  repeated Task tasks = 2;
+}
+
+// Verdict：字段一比一对齐 pipeline.Verdict（复用矩阵 §5，判定语汇不复制、只搬运）。
+message Verdict {
+  int32 site_id = 1;
+  string name = 2;
+  string url = 3;
+  string status = 4;    // RUN/LOST/ERROR/TIMEOUT/裸码
+  string stage = 5;     // raw/js
+  string evidence = 6;
+  string infra_err = 7;    // 非空=我方工具链故障，不写库
+  string nav_timeout = 8;  // 非空=站点超时，不写库
+  bool escalate = 9;       // HTTP 初审是否需渲染：路由权在 master（§4.3）
+}
+
+message ReportRequest {
+  Lane lane = 1;
+  Verdict verdict = 2;
+}
+
+message ReportResponse {
+  Action action = 1;
+}
+
+service Check {
+  rpc Pull(PullRequest) returns (PullResponse);
+  rpc Report(ReportRequest) returns (ReportResponse);
+}

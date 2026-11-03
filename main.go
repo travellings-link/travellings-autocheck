@@ -45,6 +45,8 @@ func main() {
 	root.PersistentFlags().StringVar(&cfgLogFile, "log-file", "", "日志写入指定文件（JSON 行格式）；留空则输出到 stderr")
 	root.AddCommand(checkCmd())
 	root.AddCommand(runCmd())
+	root.AddCommand(masterCmd())
+	root.AddCommand(workerCmd())
 
 	// ^C 不直接退出：先把取消信号传进管线，让它停下来、把已判定的站点整理成报告。
 	// 第一次 ^C 触发取消；若管线在收尾阶段再次按下，signal.NotifyContext 的行为
