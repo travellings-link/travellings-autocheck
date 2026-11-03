@@ -33,6 +33,7 @@ type Options struct {
 	TimeoutMS      int    // HTTP 抓取单请求预算（crawl.Raw）
 	JSSettleMS     int    // 渲染等 SPA 挂载上限（crawl.Rendered）
 	CDPURL         string // 浏览器调试端点；空/连不上 → crawl 回退本地无头 Chrome
+	RefillPct      int    // 在手剩余 < 批次×该百分比时 producer 补拉（D9）；<=0 按 25
 	// Dialer 仅测试注入（bufconn 进程内），留空走默认 TCP。
 	Dialer func(ctx context.Context, addr string) (net.Conn, error)
 }
@@ -98,62 +99,121 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 		cancel() // 一腿故障收掉另一腿：RunOnce 上抛，由命令层按 D8 退避重试
 	}
 
+	// 批内并发：producer 按 refill-pct 阈值补拉一整批进有界 pending，want 个 consumer
+	// 并发消化。want = --http-workers/--browser-workers 才真正兑现「workers×1 并发」
+	// （D10）——此前一次领 want 条却串行处理，线程数形同虚设。
+	// pending 容量 2×want：一个批在处理、一个批排队，满了即反压 producer 不再拉。
 	runLane := func(ln mspb.Lane) {
-		want := int32(o.HTTPWorkers)
+		want := o.HTTPWorkers
 		if ln == mspb.Lane_LANE_BROWSER {
-			want = int32(o.BrowserWorkers)
+			want = o.BrowserWorkers
 		}
-		for ctx.Err() == nil {
-			pr, err := cli.Pull(withToken(ctx, o.Token), &mspb.PullRequest{Lane: ln, Want: want})
-			if err != nil {
-				// 兄弟腿已见哨兵/外部 ^C 打断：不算故障，静默收工。
-				if ctx.Err() == nil {
-					fail(fmt.Errorf("pull lane=%v: %w", ln, err))
+		if want <= 0 {
+			want = 1
+		}
+		pct := o.RefillPct
+		if pct <= 0 {
+			pct = 25
+		}
+		// 补拉触发点（D9）：在手剩余 < want×pct%，向上取整避免 want 小时恒不补。
+		refillAt := (want*pct + 99) / 100
+
+		pending := make(chan *mspb.Task, 2*want)
+		var inflight atomic.Int64 // 已领未回传 = 在手（含排队 + 正在处理）
+
+		// consumer×want：crawl.Raw 纯函数、crawl.Rendered 走连接池（池大小=BrowserWorkers，
+		// 与本处 want 一致），并发安全。
+		var cwg sync.WaitGroup
+		for i := 0; i < want; i++ {
+			cwg.Add(1)
+			go func() {
+				defer cwg.Done()
+				for t := range pending {
+					if ctx.Err() != nil {
+						return // D7：见哨兵/中断后丢弃在途，不回传（master 按租约/重派处理）
+					}
+					var vr *mspb.Verdict
+					if ln == mspb.Lane_LANE_HTTP {
+						vr = judgeHTTP(ctx, o, t)
+					} else {
+						vr = judgeBrowser(ctx, o, t)
+					}
+					if ctx.Err() != nil {
+						inflight.Add(-1)
+						return
+					}
+					rr, err := cli.Report(withToken(ctx, o.Token), &mspb.ReportRequest{Lane: ln, Verdict: vr})
+					if err != nil {
+						if ctx.Err() == nil {
+							fail(fmt.Errorf("report id=%d: %w", t.GetId(), err))
+						}
+						return
+					}
+					inflight.Add(-1)
+					mu.Lock()
+					n++
+					mu.Unlock()
+					if rr.GetAction() == mspb.Action_ROUND_DONE {
+						sentinel.Store(true)
+						cancel()
+						return
+					}
 				}
-				return
-			}
-			if pr.GetAction() == mspb.Action_ROUND_DONE {
-				sentinel.Store(true) // D7：本轮结束
-				cancel()
-				return
-			}
-			for _, t := range pr.GetTasks() {
-				var vr *mspb.Verdict
-				if ln == mspb.Lane_LANE_HTTP {
-					vr = judgeHTTP(ctx, o, t)
-				} else {
-					vr = judgeBrowser(ctx, o, t)
+			}()
+		}
+
+		// producer：在手低于阈值才补拉一整批；哨兵/空队列/中断分别处理。
+		var pwg sync.WaitGroup
+		pwg.Add(1)
+		go func() {
+			defer pwg.Done()
+			defer close(pending) // producer 退出即关，consumer range 自然收摊
+			for ctx.Err() == nil {
+				if int(inflight.Load()) >= refillAt {
+					// 手头够忙，等 consumer 消化下来再补拉（refill-pct 语义）。
+					select {
+					case <-time.After(200 * time.Millisecond):
+					case <-ctx.Done():
+						return
+					}
+					continue
 				}
-				// 中断或兄弟腿已见哨兵：未回传即丢弃（D7 口径，master 端按需重派）。
-				if ctx.Err() != nil {
-					return
-				}
-				rr, err := cli.Report(withToken(ctx, o.Token), &mspb.ReportRequest{Lane: ln, Verdict: vr})
+				pr, err := cli.Pull(withToken(ctx, o.Token), &mspb.PullRequest{Lane: ln, Want: int32(want)})
 				if err != nil {
-					if ctx.Err() == nil {
-						fail(fmt.Errorf("report id=%d: %w", t.GetId(), err))
+					if ctx.Err() == nil { // 兄弟腿见哨兵/外部 ^C：不算故障
+						fail(fmt.Errorf("pull lane=%v: %w", ln, err))
 					}
 					return
 				}
-				mu.Lock()
-				n++
-				mu.Unlock()
-				if rr.GetAction() == mspb.Action_ROUND_DONE {
-					sentinel.Store(true)
+				if pr.GetAction() == mspb.Action_ROUND_DONE {
+					sentinel.Store(true) // D7：本轮结束
 					cancel()
 					return
 				}
-			}
-			// 队列暂空但未收口：活还捏在别的腿/worker 手里（M4 起由租约回收兜底）。
-			// 等一拍再拉，绝不在此退出——退出信号只有哨兵（D7）。
-			// ponytail: refill-pct 批次补拉（D9）随 M4 落地；现在是「拉完即空转轮询」。
-			if len(pr.GetTasks()) == 0 {
-				select {
-				case <-time.After(time.Second):
-				case <-ctx.Done():
+				tasks := pr.GetTasks()
+				if len(tasks) == 0 {
+					// 队列暂空但未收口：活还捏在别的腿/worker 手里（M4a 租约回收兜底）。
+					// 等一拍再拉，绝不在此退出——退出信号只有哨兵（D7）。
+					select {
+					case <-time.After(time.Second):
+					case <-ctx.Done():
+						return
+					}
+					continue
+				}
+				inflight.Add(int64(len(tasks)))
+				for _, t := range tasks {
+					select {
+					case pending <- t:
+					case <-ctx.Done():
+						return // 中断：未入队的丢弃（D7）
+					}
 				}
 			}
-		}
+		}()
+
+		pwg.Wait() // producer 结束（已 close(pending)）
+		cwg.Wait() // 消费者排空剩余
 	}
 
 	var wg sync.WaitGroup

@@ -256,6 +256,7 @@ func workerCmd() *cobra.Command {
 					Master: c.Master, Token: c.Token,
 					HTTPWorkers: c.HTTPWorkers, BrowserWorkers: c.BrowserWorkers,
 					TimeoutMS: c.TimeoutMS, JSSettleMS: c.JSSettleMS, CDPURL: c.CDPURL,
+					RefillPct: c.RefillPct,
 				})
 				if ctx.Err() != nil {
 					return ctx.Err()
