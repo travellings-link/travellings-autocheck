@@ -72,7 +72,7 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 	}
 	// 明细表只进 InfraErr 站：khbit/wayjam/example/spa/slow（站点侧）都不进
 	for _, n := range []string{"khbit", "example.com", "spa", "slow"} {
-		if strings.Contains(card, "\"name\":\"" + n + "\"") {
+		if strings.Contains(card, "\"name\":\""+n+"\"") {
 			t.Fatalf("非工具链错误站点 %s 不应进明细表，得到: %s", n, card)
 		}
 	}
@@ -89,7 +89,7 @@ func TestFeishuTemplateReflectsWrite(t *testing.T) {
 		want    string
 	}{{true, "green"}, {false, "red"}, {false, "red"}} {
 		b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, c.written))
-		if !strings.Contains(string(b), "\"template\":\"" + c.want + "\"") {
+		if !strings.Contains(string(b), "\"template\":\""+c.want+"\"") {
 			t.Fatalf("written=%v 应 template=%s，得到: %s", c.written, c.want, b)
 		}
 	}

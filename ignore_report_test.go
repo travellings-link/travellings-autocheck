@@ -50,15 +50,18 @@ func TestReportNoIgnoreWhenClean(t *testing.T) {
 	}
 }
 
-// isIgnore 的语义边界
+// Verdict.Ignored 的语义边界（原先是 main.isIgnore，收敛到 pipeline 后测同名行为）。
 func TestIsIgnore(t *testing.T) {
-	if !isIgnore(pipeline.Verdict{InfraErr: "x"}) {
+	infra := pipeline.Verdict{InfraErr: "x"}
+	nav := pipeline.Verdict{NavTimeout: "x"}
+	plain := pipeline.Verdict{Status: check.Error}
+	if !infra.Ignored() {
 		t.Error("InfraErr 应判 IGNORE")
 	}
-	if !isIgnore(pipeline.Verdict{NavTimeout: "x"}) {
+	if !nav.Ignored() {
 		t.Error("NavTimeout 应判 IGNORE")
 	}
-	if isIgnore(pipeline.Verdict{Status: check.Error}) {
+	if plain.Ignored() {
 		t.Error("普通 ERROR 不应判 IGNORE")
 	}
 }

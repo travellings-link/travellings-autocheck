@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"travellings-bot-go/check"
+	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
 )
 
@@ -37,13 +38,13 @@ func TestPrintReportListsProblemSites(t *testing.T) {
 
 // 中文表头不能把列挤歪：CJK 记 2 列。
 func TestPadCJKWidth(t *testing.T) {
-	if got := displayWidth("判定"); got != 4 {
-		t.Fatalf("displayWidth(判定) = %d, want 4", got)
+	if got := ui.DisplayWidth("判定"); got != 4 {
+		t.Fatalf("ui.DisplayWidth(判定) = %d, want 4", got)
 	}
-	if got := displayWidth("raw"); got != 3 {
-		t.Fatalf("displayWidth(raw) = %d, want 3", got)
+	if got := ui.DisplayWidth("raw"); got != 3 {
+		t.Fatalf("ui.DisplayWidth(raw) = %d, want 3", got)
 	}
-	if pad("判定", 6) != "判定  " {
-		t.Fatalf("pad(判定,6) = %q", pad("判定", 6))
+	if ui.Pad("判定", 6) != "判定  " {
+		t.Fatalf("ui.Pad(判定,6) = %q", ui.Pad("判定", 6))
 	}
 }

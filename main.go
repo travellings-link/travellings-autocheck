@@ -17,6 +17,7 @@ import (
 	"travellings-bot-go/check"
 	"travellings-bot-go/crawl"
 	"travellings-bot-go/db"
+	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -113,7 +114,7 @@ func checkCmd() *cobra.Command {
 			// 短字段用表格对齐；evidence 可能很长（含完整错误链），
 			// 塞进定宽单元格会被截断——而诊断恰恰需要完整原文。
 			// 所以 evidence 单独占一块，按终端宽度自动换行。
-			r := newReporter(os.Stdout)
+			r := ui.NewReporter(os.Stdout)
 			short := []string{"url", "verdict", "stage", "raw_ms", "js_ms"}
 			rows := make([]table.Row, 0, len(short))
 			for _, k := range short {
@@ -123,16 +124,16 @@ func checkCmd() *cobra.Command {
 				}
 				rows = append(rows, table.Row{k, fmt.Sprint(v)})
 			}
-			r.block(newTable([]table.Column{
+			r.Block(ui.NewTable([]table.Column{
 				{Title: "字段", Width: 10},
 				{Title: "值", Width: 70},
 			}, rows).View())
 
 			if ev, ok := out["evidence"]; ok {
-				r.blank()
-				r.text(labelStyle.Render("evidence"))
-				for _, ln := range wrapText(fmt.Sprint(ev), terminalWidth()-2) {
-					r.text("  " + ln)
+				r.Blank()
+				r.Text(ui.LabelStyle.Render("evidence"))
+				for _, ln := range ui.WrapText(fmt.Sprint(ev), ui.TerminalWidth()-2) {
+					r.Text("  " + ln)
 				}
 			}
 			return nil
@@ -163,105 +164,6 @@ func runCmd() *cobra.Command {
 	// run 的参数集中定义：--help 展示与实际读到的配置必须一致。
 	addRunFlags(cmd, &cfg)
 	return cmd
-}
-
-// —— ANSI 颜色（零依赖）。非 TTY 或 NO_COLOR 时自动降级为纯文本，
-// 保证管道/重定向/CI 日志里不出现控制字符。 ——
-type color int
-
-const (
-	_ color = iota // 占位，保证后续色值从 1 开始
-	cDim
-	cBold
-	cRed
-	cGreen
-	cYellow
-	cCyan
-)
-
-// 报表写 stdout、日志写 stderr，两条流要各自判断是否终端：
-// 只重定向 stdout 时（如 ... > report.txt），终端里的日志仍应上色。
-// 颜色能力惰性求值：包级变量在某些加载顺序下可能早于环境/句柄就绪，
-// 且测试需要能重新探测。用 OnceValue 保证只探测一次、且发生在真正要输出时。
-var (
-	useColorOnce       = sync.OnceValue(func() bool { return detectColor(os.Stdout) })
-	useColorStderrOnce = sync.OnceValue(func() bool { return detectColor(os.Stderr) })
-)
-
-func useColor() bool       { return useColorOnce() }
-func useColorStderr() bool { return useColorStderrOnce() }
-
-// detectColor 判定该流是否支持颜色，遵循业界通行的环境变量约定：
-// NO_COLOR / TERM=dumb 强制关闭；CLICOLOR_FORCE / CLICOLOR 可覆盖终端探测。
-// Windows 上同时尝试开启 VT 解析（旧 conhost 默认不认 ANSI）。
-func detectColor(f *os.File) bool {
-	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
-		return false
-	}
-	if v, ok := os.LookupEnv("CLICOLOR_FORCE"); ok && v != "0" {
-		return true
-	}
-	if os.Getenv("CLICOLOR") == "0" {
-		return false
-	}
-	return enableVT(f)
-}
-
-func colorize(c color, s string) string {
-	return colorizeTo(os.Stdout, c, s)
-}
-
-// colorizeTo 按目标流的终端能力决定是否上色。
-func colorizeTo(f *os.File, c color, s string) string {
-	on := useColor()
-	if f == os.Stderr {
-		on = useColorStderr()
-	}
-	if !on {
-		return s
-	}
-	var code string
-	switch c {
-	case cDim:
-		code = "\x1b[2m"
-	case cBold:
-		code = "\x1b[1m"
-	case cRed:
-		code = "\x1b[31m"
-	case cGreen:
-		code = "\x1b[32m"
-	case cYellow:
-		code = "\x1b[33m"
-	case cCyan:
-		code = "\x1b[36m"
-	default:
-		return s
-	}
-	return code + s + "\x1b[0m"
-}
-
-// isIgnore 判断该条判定是否属于"不写库"。
-// 这类结果的结论可信度不足（我方工具链问题或站点超时），
-// 既不写库也不该混进正常的 ERROR/TIMEOUT 统计。
-func isIgnore(v pipeline.Verdict) bool {
-	return v.InfraErr != "" || v.NavTimeout != ""
-}
-
-// statusColor 按判定语义词返回样式：RUN 绿、LOST 黄、ERROR/TIMEOUT 红、IGNORE 紫。
-// 返回 Style 而非字符串，方便调用方决定宽度/加粗等附加属性。
-func statusColor(s string) lipgloss.Style {
-	switch s {
-	case "RUN":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // 亮绿
-	case "LOST":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // 亮黄
-	case "ERROR", "TIMEOUT":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")) // 亮红
-	case "IGNORE":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // 紫：结论不可信
-	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // 裸 HTTP 码等
-	}
 }
 
 // log 是全局 logger，由 setupLog 在启动时初始化（默认 Info 级、无颜色）。
@@ -335,7 +237,7 @@ func logWriter(path string) io.Writer {
 	// 否则日志会插进进度块的相对定位基准里，整轮错位成两块进度条。
 	return progWriter{w: zerolog.ConsoleWriter{
 		Out:        os.Stderr,
-		NoColor:    !useColorStderr(),
+		NoColor:    !ui.UseColorStderr(),
 		TimeFormat: "15:04:05.000",
 		PartsOrder: []string{zerolog.TimestampFieldName, zerolog.LevelFieldName,
 			zerolog.MessageFieldName},
@@ -364,59 +266,15 @@ func levelTag(s string) string {
 	}
 }
 
-// reporter 是报表的唯一输出出口。
-// 分工：
-//   - 结构化部分（表格、进度条）交给 bubbles 组件；
-//   - 文本部分（标题、空行、状态提示）交给 lipgloss 渲染——
-//     bubbles 没有文本/日志组件，它的组件清单是：table/progress/list/
-//     textinput/textarea/viewport/spinner/paginator/help/key/filepicker/
-//     cursor/stopwatch/timer/runeutil，都是交互控件。
-//
-// reporter 自身只负责把已渲染的字符串写出去，其余代码不再直接调 fmt。
-type reporter struct{ w io.Writer }
-
-func newReporter(w io.Writer) *reporter { return &reporter{w: w} }
-
-// write 输出一行；空字符串即空行。
-// lipgloss 的 Render 对空串返回空串，所以标题/空行/正文可以走同一条路径。
-func (r *reporter) write(s string) {
-	_, _ = fmt.Fprintln(r.w, s)
-}
-
-// title 输出报告主标题：加粗，片段用 · 分隔。
-func (r *reporter) title(parts ...string) {
-	r.write(headingStyle.Render(strings.Join(parts, " · ")))
-}
-
-// section 输出小节标题：暗色，作为内容分组。
-func (r *reporter) section(s string) {
-	r.write(sectionStyle.Render(s))
-}
-
-// blank 输出一个空行。
-func (r *reporter) blank() { r.write("") }
-
-// text 输出一段已渲染的文本。
-func (r *reporter) text(s string) { r.write(s) }
-
-// block 输出组件渲染出的多行文本（如 table.View()）。
-// table 会把每行右侧补齐到表格全宽，这里逐行裁掉行尾空格，
-// 避免终端里出现大片空白，也便于拷进聊天窗口。
-func (r *reporter) block(s string) {
-	for _, ln := range strings.Split(s, "\n") {
-		r.write(strings.TrimRight(ln, " "))
-	}
-}
-
 // printReport 输出人类可读的巡查报告：状态分布 + 问题站点明细。
 // 排版与着色一律交给 bubbles（table 负责表格，lipgloss 样式由 table.Styles 承载），
 // 不再手工补空格或自己算 CJK 宽度。
 func printReport(w io.Writer, vs []pipeline.Verdict, elapsed time.Duration, interrupted bool) {
-	r := newReporter(w)
+	r := ui.NewReporter(w)
 	stats := countStats(vs)
 	total := len(vs)
 	if total == 0 {
-		r.text("本次没有巡查任何站点")
+		r.Text("本次没有巡查任何站点")
 		return
 	}
 
@@ -434,21 +292,21 @@ func printReport(w io.Writer, vs []pipeline.Verdict, elapsed time.Duration, inte
 		case v.NavTimeout != "":
 			navTimeoutN++
 		}
-		if isIgnore(v) {
+		if v.Ignored() {
 			ignoreN++
 		}
 	}
 
-	r.blank()
+	r.Blank()
 	// 中断与正常跑完的标题必须一眼可分：中断时这 N 站不代表全量清单，
 	// 误当成「巡查完成」会让人以为剩下的站都还没开始就已经有结论了。
 	headText := "巡查完成 " + strconv.Itoa(total) + " 站"
 	if interrupted {
 		headText = "巡查中断 · 已判定 " + strconv.Itoa(total) + " 站"
 	}
-	head := headingStyle.Render(headText) + " · " +
+	head := ui.HeadingStyle.Render(headText) + " · " +
 		runPctTag(pct) + " · " +
-		dimStyle.Render("用时 "+elapsed.Round(time.Millisecond).String())
+		ui.DimStyle.Render("用时 "+elapsed.Round(time.Millisecond).String())
 	// IGNORE 用紫色：既不是错误（红会让人以为站点坏了），
 	// 也不是正常（淡色会被忽略），而是"本轮结论不可信、不写库"。
 	// 括号里给出细分原因，方便一眼判断该查 CDP 还是该调 js-settle。
@@ -462,10 +320,10 @@ func printReport(w io.Writer, vs []pipeline.Verdict, elapsed time.Duration, inte
 		case navTimeoutN > 0:
 			detail = fmt.Sprintf("，站点超时 %d", navTimeoutN)
 		}
-		head += " · " + unwrittenStyle.Render(fmt.Sprintf("IGNORE %d%s", ignoreN, detail))
+		head += " · " + ui.UnwrittenStyle.Render(fmt.Sprintf("IGNORE %d%s", ignoreN, detail))
 	}
-	r.text(head)
-	r.blank()
+	r.Text(head)
+	r.Blank()
 
 	// —— 状态分布：bubbles/table ——
 	type row struct {
@@ -477,7 +335,7 @@ func printReport(w io.Writer, vs []pipeline.Verdict, elapsed time.Duration, inte
 	rows := make([]row, 0, len(stats)+1)
 	counts := map[string]int{}
 	for _, v := range vs {
-		if isIgnore(v) {
+		if v.Ignored() {
 			continue // IGNORE 单独成行
 		}
 		counts[string(v.Status)]++
@@ -495,17 +353,17 @@ func printReport(w io.Writer, vs []pipeline.Verdict, elapsed time.Duration, inte
 		return rows[i].name < rows[j].name
 	})
 
-	r.section("状态分布")
-	r.text(joinRow(
-		cell("判定", 10, dimStyle),
-		cell("数量", 8, dimStyle),
-		cell("占比", 8, dimStyle),
+	r.Section("状态分布")
+	r.Text(ui.JoinRow(
+		ui.Cell("判定", 10, ui.DimStyle),
+		ui.Cell("数量", 8, ui.DimStyle),
+		ui.Cell("占比", 8, ui.DimStyle),
 	))
 	for _, x := range rows {
-		r.text(joinRow(
-			cell(x.name, 10, statusColor(x.name)),
-			cell(strconv.Itoa(x.n), 8, boldStyle),
-			cell(fmt.Sprintf("%.1f%%", 100*float64(x.n)/float64(total)), 8, dimStyle),
+		r.Text(ui.JoinRow(
+			ui.Cell(x.name, 10, ui.StatusColor(x.name)),
+			ui.Cell(strconv.Itoa(x.n), 8, ui.BoldStyle),
+			ui.Cell(fmt.Sprintf("%.1f%%", 100*float64(x.n)/float64(total)), 8, ui.DimStyle),
 		))
 	}
 
@@ -517,130 +375,46 @@ func printReport(w io.Writer, vs []pipeline.Verdict, elapsed time.Duration, inte
 		}
 	}
 	if len(bad) == 0 {
-		r.blank()
-		r.text(okStyle.Render("无问题站点"))
+		r.Blank()
+		r.Text(ui.OkStyle.Render("无问题站点"))
 		return
 	}
 	sort.Slice(bad, func(i, j int) bool { return bad[i].SiteID < bad[j].SiteID })
 
-	r.blank()
-	r.text(headingStyle.Render(fmt.Sprintf("问题站点（%d）", len(bad))))
+	r.Blank()
+	r.Text(ui.HeadingStyle.Render(fmt.Sprintf("问题站点（%d）", len(bad))))
 	// 「原因」列按终端剩余宽度自适应：错误原文是诊断的关键，
 	// 固定 60 列会把 TLS 错误链、CDP 超时详情都切掉，让人看不懂为什么失败。
 	const (
 		idW, stW, stageW, urlW = 6, 8, 6, 38
 	)
-	reasonW := terminalWidth() - (idW + stW + stageW + urlW) - 6
+	reasonW := ui.TerminalWidth() - (idW + stW + stageW + urlW) - 6
 	if reasonW < 30 {
 		reasonW = 30 // 窄终端下保底，宁可折行也别丢信息
 	}
 
-	r.text(joinRow(
-		cell("ID", idW, dimStyle),
-		cell("判定", stW, dimStyle),
-		cell("阶段", stageW, dimStyle),
-		cell("站点", urlW, dimStyle),
-		cell("原因", reasonW, dimStyle),
+	r.Text(ui.JoinRow(
+		ui.Cell("ID", idW, ui.DimStyle),
+		ui.Cell("判定", stW, ui.DimStyle),
+		ui.Cell("阶段", stageW, ui.DimStyle),
+		ui.Cell("站点", urlW, ui.DimStyle),
+		ui.Cell("原因", reasonW, ui.DimStyle),
 	))
 	for _, v := range bad {
 		// 不写库的判定在明细里统一显示 IGNORE，与状态分布对得上；
 		// 原始 status（TIMEOUT/ERROR）已含在 evidence 里，不丢信息。
 		st := string(v.Status)
-		if isIgnore(v) {
+		if v.Ignored() {
 			st = "IGNORE"
 		}
-		r.text(joinRow(
-			cell(strconv.Itoa(v.SiteID), idW, dimStyle),
-			cell(st, stW, statusColor(st)),
-			cell(string(v.Stage), stageW, dimStyle),
-			cell(truncate(v.URL, urlW-1), urlW, lipgloss.NewStyle()),
-			cell(truncate(v.Evidence, reasonW-1), reasonW, dimStyle),
+		r.Text(ui.JoinRow(
+			ui.Cell(strconv.Itoa(v.SiteID), idW, ui.DimStyle),
+			ui.Cell(st, stW, ui.StatusColor(st)),
+			ui.Cell(string(v.Stage), stageW, ui.DimStyle),
+			ui.Cell(truncate(v.URL, urlW-1), urlW, lipgloss.NewStyle()),
+			ui.Cell(truncate(v.Evidence, reasonW-1), reasonW, ui.DimStyle),
 		))
 	}
-}
-
-// newTable 构造一张静态表（不含 ANSI 的纯文本用它，边框与对齐由 bubbles 负责）。
-// 注意：bubbles 的 table 用 len() 计算单元格宽度，含 ANSI 的字符串会被
-// 当成可见字符而截断（实测出现 "ERR…"），所以带颜色的内容不要喂给它。
-func newTable(cols []table.Column, rows []table.Row) table.Model {
-	sum := 0
-	for _, c := range cols {
-		sum += c.Width
-	}
-	t := table.New(
-		table.WithColumns(cols),
-		table.WithRows(rows),
-		table.WithWidth(sum+len(cols)*3),
-		table.WithHeight(len(rows)+1),
-		table.WithFocused(false),
-	)
-	styles := table.DefaultStyles()
-	// Header 与 Cell 必须同样的内边距，否则表头和数据列会错开一格。
-	styles.Header = styles.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("8")).
-		BorderBottom(true).
-		Bold(true).
-		Padding(0, 1)
-	styles.Cell = styles.Cell.Padding(0, 1)
-	styles.Selected = lipgloss.NewStyle()
-	t.SetStyles(styles)
-	return t
-}
-
-// cell 构造一个定宽单元格。
-// lipgloss 的 Width() 按**显示宽度**填充，正确跳过 ANSI 转义，
-// 所以彩色内容用它排版不会被算错——这正是 table 组件做不到的。
-func cell(s string, width int, style lipgloss.Style) string {
-	return style.Width(width).Render(s)
-}
-
-// row 把若干已定宽的单元格拼成一行。
-func joinRow(cells ...string) string { return strings.Join(cells, " ") }
-
-// 样式统一由 bubbles/lipgloss 提供，这里只做语义命名，不自己算排版。
-var (
-	headingStyle = lipgloss.NewStyle().Bold(true)
-	sectionStyle = lipgloss.NewStyle().Faint(true)
-	boldStyle    = lipgloss.NewStyle().Bold(true)
-	dimStyle     = lipgloss.NewStyle().Faint(true)
-	okStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
-	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
-	// unwrittenStyle 用于「未写库」标记：紫色（洋红），区别于错误的红、警告的黄。
-	unwrittenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	labelStyle     = lipgloss.NewStyle().Faint(true)
-	errStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-)
-
-// wrapText 按显示宽度折行，不切断单词也不吞字符。
-// evidence 里常见长 URL 与错误链，定宽截断会丢失诊断信息。
-func wrapText(s string, width int) []string {
-	if width < 20 {
-		width = 20
-	}
-	var out []string
-	for _, paragraph := range strings.Split(s, "\n") {
-		line := ""
-		for _, word := range strings.Fields(paragraph) {
-			if line == "" {
-				line = word
-				continue
-			}
-			if displayWidth(line)+1+displayWidth(word) <= width {
-				line += " " + word
-				continue
-			}
-			out = append(out, line)
-			line = word
-		}
-		if line != "" {
-			out = append(out, line)
-		}
-	}
-	if len(out) == 0 {
-		out = []string{s}
-	}
-	return out
 }
 
 // runPctTag 给 RUN 占比上色：>=90 绿、>=70 黄、其余红（与闸门直觉一致）。
@@ -648,41 +422,12 @@ func runPctTag(pct float64) string {
 	s := strconv.FormatFloat(pct, 'f', 1, 64) + "% RUN"
 	switch {
 	case pct >= 90:
-		return colorize(cGreen, s)
+		return ui.Colorize(ui.Green, s)
 	case pct >= 70:
-		return colorize(cYellow, s)
+		return ui.Colorize(ui.Yellow, s)
 	default:
-		return colorize(cRed, s)
+		return ui.Colorize(ui.Red, s)
 	}
-}
-
-// displayWidth 估算终端显示宽度：CJK/全角算 2 列，其余算 1。
-// 表格含中文表头，用 len() 排版会错位。
-func displayWidth(s string) int {
-	w := 0
-	for _, r := range s {
-		switch {
-		case r >= 0x1100 && r <= 0x115f, // 谚文字母
-			r >= 0x2e80 && r <= 0xa4cf && r != 0x303f, // CJK 部首~彝文
-			r >= 0xac00 && r <= 0xd7a3,                // 谚文音节
-			r >= 0xf900 && r <= 0xfaff,                // CJK 兼容
-			r >= 0xfe30 && r <= 0xfe6f,                // CJK 兼容标点
-			r >= 0xff00 && r <= 0xff60,                // 全角
-			r >= 0xffe0 && r <= 0xffe6:                // 全角符号
-			w += 2
-		default:
-			w++
-		}
-	}
-	return w
-}
-
-// pad 右补空格到指定显示宽度。
-func pad(s string, width int) string {
-	if d := displayWidth(s); d < width {
-		return s + strings.Repeat(" ", width-d)
-	}
-	return s
 }
 
 // truncate 按 rune 截断，避免把多字节字符切坏。

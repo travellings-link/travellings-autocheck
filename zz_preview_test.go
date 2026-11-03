@@ -15,9 +15,9 @@ import (
 // 生成两份样例便于在 open.feishu.cn 卡片预览器里直接打开对照；
 // webhook 实际发送用的是 dsl 本体 + msg_type=interactive 外层（见 webhook 产物）。
 type cardFile struct {
-	Name      string        `json:"name"`
-	DSL       feishuCard    `json:"dsl"`
-	Variables []cardVar     `json:"variables"`
+	Name      string     `json:"name"`
+	DSL       feishuCard `json:"dsl"`
+	Variables []cardVar  `json:"variables"`
 }
 type cardVar struct {
 	Type     string `json:"type"`
@@ -29,8 +29,8 @@ type cardVar struct {
 
 func writeCardFile(name string, card feishuCard) {
 	b, _ := json.Marshal(cardFile{
-		Name: "开往巡查",
-		DSL:  card,
+		Name:      "开往巡查",
+		DSL:       card,
 		Variables: []cardVar{{Type: "text", APIName: "var_now", Name: "now", Desc: "报告时间", MockData: "2026/11/02 23:03"}},
 	})
 	// 压成单行，与用户示例文件的紧凑风格一致
@@ -40,7 +40,6 @@ func writeCardFile(name string, card feishuCard) {
 	os.WriteFile(name, c, 0o644)
 }
 
-
 func TestZZWritePreview(t *testing.T) {
 	vs := []pipeline.Verdict{}
 	add := func(s check.Verdict, n int, tag string, ev string, infra, nav bool) {
@@ -49,8 +48,12 @@ func TestZZWritePreview(t *testing.T) {
 			v := pipeline.Verdict{SiteID: id, Status: s,
 				Name: tag + "-" + itoa(id), URL: "https://" + tag + itoa(id) + ".example.com/",
 				Evidence: ev}
-			if infra { v.InfraErr = ev }
-			if nav { v.NavTimeout = ev }
+			if infra {
+				v.InfraErr = ev
+			}
+			if nav {
+				v.NavTimeout = ev
+			}
 			vs = append(vs, v)
 		}
 	}
@@ -66,4 +69,3 @@ func TestZZWritePreview(t *testing.T) {
 func itoa(n int) string {
 	return fmt.Sprint(n)
 }
-

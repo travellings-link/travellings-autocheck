@@ -7,6 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
 )
 
@@ -19,7 +20,7 @@ func newTestProgress(buf *bytes.Buffer, total int) *progressView {
 
 // 非 TTY 必须完全不画：管道/CI 里出现 ESC 会污染日志。
 func TestProgressDisabledWhenNotTTY(t *testing.T) {
-	if useColorStderr() {
+	if ui.UseColorStderr() {
 		t.Skip("running on a TTY")
 	}
 	var buf bytes.Buffer
@@ -146,11 +147,11 @@ func TestProgressFinishKeepsFinalFrame(t *testing.T) {
 // 超宽行必须截断：自动换行会让上移行数失效。
 func TestClipDisplayPreventsWrap(t *testing.T) {
 	long := "巡查中 " + strings.Repeat("█", 100)
-	if w := visibleWidth(clipDisplay(long, 40)); w > 40 {
+	if w := visibleWidth(ui.ClipDisplay(long, 40)); w > 40 {
 		t.Fatalf("clipped width %d exceeds 40", w)
 	}
 	colored := "\x1b[32m" + strings.Repeat("█", 100) + "\x1b[0m"
-	clipped := clipDisplay(colored, 20)
+	clipped := ui.ClipDisplay(colored, 20)
 	if w := visibleWidth(clipped); w > 20 {
 		t.Fatalf("ANSI width miscount: %d", w)
 	}
@@ -175,7 +176,7 @@ func visibleWidth(s string) int {
 			continue
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		w += displayWidth(string(r))
+		w += ui.DisplayWidth(string(r))
 		i += size
 	}
 	return w

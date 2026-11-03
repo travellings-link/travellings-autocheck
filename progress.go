@@ -8,14 +8,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"travellings-bot-go/crawl"
+	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
 
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/lipgloss"
-	"golang.org/x/term"
 )
 
 // progress 在 stderr 上画多行分段进度：抓取 / 判定 / 渲染 / 总计。
@@ -69,7 +68,7 @@ func (s progWriter) Write(b []byte) (int, error) {
 func newProgress(total int, stats *pipeline.StageStats, verbose bool) *progressView {
 	p := &progressView{
 		w:       os.Stderr,
-		enabled: useColorStderr() && !verbose,
+		enabled: ui.UseColorStderr() && !verbose,
 		total:   total,
 		stats:   stats,
 		start:   time.Now(),
@@ -87,14 +86,14 @@ func newProgress(total int, stats *pipeline.StageStats, verbose bool) *progressV
 func newMasterProgress(snap func() (hd, ht, bd, bt, rep int), verbose bool) *progressView {
 	p := &progressView{
 		w:       os.Stderr,
-		enabled: useColorStderr() && !verbose, // 只在 TTY 且非 -v：与 run 同一开关口径
+		enabled: ui.UseColorStderr() && !verbose, // 只在 TTY 且非 -v：与 run 同一开关口径
 		start:   time.Now(),
 	}
 	p.bar = progress.New(progress.WithDefaultGradient())
 	p.frameFn = func(now time.Time) []string {
 		hd, ht, bd, bt, rep := snap()
 		return []string{
-			colorizeTo(os.Stderr, cBold, "开往巡查 · 主从") + "  " + now.Sub(p.start).Round(time.Second).String(),
+			ui.ColorizeTo(os.Stderr, ui.Bold, "开往巡查 · 主从") + "  " + now.Sub(p.start).Round(time.Second).String(),
 			p.barLine("爬取队列", hd, ht, 8),
 			p.barLine("渲染队列", bd, bt, 8),
 			p.barLine("所有任务", rep, ht+bt, 8),
@@ -209,11 +208,11 @@ func (p *progressView) paintLocked(frame []string) {
 	if prev > 0 {
 		p.moveToFirst(prev)
 	}
-	width := terminalWidth()
+	width := ui.TerminalWidth()
 	for i, line := range frame {
 		// 必须保证一行不超过终端宽度：一旦自动换行，物理行数就不等于逻辑行数，
 		// 上移行数随之失效，画面会错位堆叠。
-		_, _ = fmt.Fprint(p.w, "\r\x1b[2K"+clipDisplay(line, width))
+		_, _ = fmt.Fprint(p.w, "\r\x1b[2K"+ui.ClipDisplay(line, width))
 		if i < len(frame)-1 {
 			_, _ = fmt.Fprint(p.w, "\n")
 		}
@@ -285,7 +284,7 @@ func (p *progressView) render(now time.Time) []string {
 	// 结构：标题 / 总进度 / 抓取 / 判定 /（渲染）/ 状态计数
 	// 总进度以"已判定数"为准——它才是真正完成的站点数。
 	lines := []string{
-		colorizeTo(os.Stderr, cBold, "开往巡查") + "  " + elapsed.Round(time.Second).String(),
+		ui.ColorizeTo(os.Stderr, ui.Bold, "开往巡查") + "  " + elapsed.Round(time.Second).String(),
 		p.stageLine("总进度", judged, p.total),
 		p.stageLine("抓取", fetched, p.total),
 		p.stageLine("判定", judged, p.total),
@@ -326,15 +325,15 @@ func (p *progressView) statusLine() string {
 		parts = append(parts, it.style.Render(fmt.Sprintf("%s %d", it.label, it.n)))
 	}
 	if len(parts) == 0 {
-		parts = append(parts, dimStyle.Render("等待首批判定…"))
+		parts = append(parts, ui.DimStyle.Render("等待首批判定…"))
 	}
 
-	left := "  " + strings.Join(parts, dimStyle.Render(" · "))
+	left := "  " + strings.Join(parts, ui.DimStyle.Render(" · "))
 
 	// 标签页数：右对齐，涨了就说明有标签页没关掉
 	tabs := crawl.TabCount()
 	if tabs >= 0 {
-		left += "   " + dimStyle.Render(fmt.Sprintf("tabs %d", tabs))
+		left += "   " + ui.DimStyle.Render(fmt.Sprintf("tabs %d", tabs))
 	}
 	return left
 }
@@ -367,7 +366,7 @@ func (p *progressView) barLine(label string, done, total, width int) string {
 	if total > 0 {
 		counts = fmt.Sprintf("%d/%d", done, total)
 	}
-	return "  " + joinRow(labelCell, countStyle.Width(9).Render(counts), p.bar.ViewAs(pct))
+	return "  " + ui.JoinRow(labelCell, countStyle.Width(9).Render(counts), p.bar.ViewAs(pct))
 }
 
 // 进度条专用样式。阶段标签用青色区分于报表正文。
@@ -382,44 +381,6 @@ func stageStyle(label string) lipgloss.Style {
 		return lipgloss.NewStyle().Bold(true)
 	}
 	return stageLabelStyle
-}
-
-// terminalWidth 返回可用列数；取不到时给保守默认，避免一行撑爆换行。
-func terminalWidth() int {
-	if w, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && w > 0 {
-		return w - 1
-	}
-	return 79
-}
-
-// clipDisplay 把已带 ANSI 的字符串按显示宽度截断。
-// 逐字符扫描，遇到 ESC 序列整段原样带走（不计宽度），其余按显示宽度累计。
-func clipDisplay(s string, width int) string {
-	var b strings.Builder
-	used := 0
-	for i := 0; i < len(s); {
-		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
-			j := i + 2
-			for j < len(s) && !(s[j] >= 0x40 && s[j] <= 0x7e) {
-				j++
-			}
-			if j < len(s) {
-				j++
-			}
-			b.WriteString(s[i:j])
-			i = j
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		rw := displayWidth(string(r))
-		if used+rw > width {
-			break
-		}
-		used += rw
-		b.WriteString(s[i : i+size])
-		i += size
-	}
-	return b.String()
 }
 
 // 注：原先的 padDisplay 已移除——排版统一交给 lipgloss 的 Width()，

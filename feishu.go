@@ -74,7 +74,7 @@ type tableColumn struct {
 	Name            string         `json:"name"`
 	DisplayName     string         `json:"display_name"`
 	HorizontalAlign string         `json:"horizontal_align"`
-	VerticalAlign    string         `json:"vertical_align,omitempty"`
+	VerticalAlign   string         `json:"vertical_align,omitempty"`
 	Width           string         `json:"width"`
 	Format          map[string]any `json:"format,omitempty"`
 }
@@ -115,7 +115,7 @@ type feishuCard struct {
 func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool) feishuCard {
 	runN, lostN, errN, tmoN, httpN, ignoreN := 0, 0, 0, 0, 0, 0
 	for _, v := range vs {
-		if isIgnore(v) {
+		if v.Ignored() {
 			ignoreN++
 			continue
 		}
@@ -166,8 +166,8 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 	}
 
 	// 明细表只列**未被自动归类识别的工具链错误**（InfraErr：CDP 断连、浏览器崩溃、
-// target 丢失这类落不进「站点慢/站点坏了」的错误）。站点侧问题（LOST/ERROR/
-// HTTP 码/站点超时）不进表——它们的结论已写在库和终端报告里，塞进群只是噪声。
+	// target 丢失这类落不进「站点慢/站点坏了」的错误）。站点侧问题（LOST/ERROR/
+	// HTTP 码/站点超时）不进表——它们的结论已写在库和终端报告里，塞进群只是噪声。
 	rows := make([]tableRow, 0, len(vs))
 	for _, v := range vs {
 		if v.InfraErr == "" {
@@ -189,7 +189,6 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		Content: fmt.Sprintf("巡查 **%d** 站 · 用时 %s · RUN 占比 **%s%%**", total, elapsed.Round(time.Second), strconv.FormatFloat(runPct, 'f', 1, 64)),
 		Margin:  "0px 0px 0px 0px",
 	}}
-
 
 	// 有未归类的工具链错误才出表格；没有就整段消失（含分隔线）
 	if len(rows) > 0 {
@@ -232,7 +231,7 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 			Title:    cardText{Tag: "plain_text", Content: "开往自动化巡查报告"},
 			Subtitle: cardText{Tag: "plain_text", Content: time.Now().Format("2006-01-02 15:04 MST")},
 			Template: template,
-			Padding: "12px 12px 12px 12px",
+			Padding:  "12px 12px 12px 12px",
 		},
 		Body: map[string]any{"direction": "vertical", "padding": "12px 12px 12px 12px", "elements": elements},
 	}
