@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"gorm.io/gorm"
 
+	"travellings-bot-go/crawl"
 	"travellings-bot-go/db"
 	"travellings-bot-go/internal/feishu"
 	"travellings-bot-go/internal/report"
@@ -188,12 +189,12 @@ func masterCmd() *cobra.Command {
 }
 
 // workerCmd：连 master 跑拉流循环；连不上按 D8 无限重试（指数退避封顶 60s）。
-// HTTP 初审腿走真实 crawl.Raw+check.Evaluate；Browser 渲染腿 crawl.Rendered 留 M3。
+// 两腿并发：HTTP 初审 crawl.Raw+check.Evaluate；Browser 渲染 crawl.Rendered（M3 真实）。
 func workerCmd() *cobra.Command {
 	var c workerConfig
 	cmd := &cobra.Command{
 		Use:   "worker",
-		Short: "主从模式 worker：从 master 拉任务并逐条回传（HTTP 腿真实抓取）",
+		Short: "主从模式 worker：从 master 拉任务并逐条回传（HTTP+Browser 两腿真实干活）",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if c.Master == "" || c.Token == "" {
@@ -202,12 +203,22 @@ func workerCmd() *cobra.Command {
 			if c.HTTPWorkers <= 0 && c.BrowserWorkers <= 0 {
 				return fmt.Errorf("无能力：--http-workers 与 --browser-workers 至少一个 >0（D5）")
 			}
+			// 渲染腿连接模型照搬 runOnce：并行度来自连接数，默认跟随 --browser-workers；
+			// 池是懒建的（首次 crawl.Rendered 才 Dial），无 Browser 能力时这行无副作用。
+			conns := c.CDPConns
+			if conns <= 0 {
+				conns = c.BrowserWorkers
+			}
+			if conns > 0 {
+				crawl.SetConnCount(conns)
+				defer crawl.CloseBrowser()
+			}
 			backoff := time.Second
 			for {
 				n, err := worker.RunOnce(ctx, worker.Options{
 					Master: c.Master, Token: c.Token,
 					HTTPWorkers: c.HTTPWorkers, BrowserWorkers: c.BrowserWorkers,
-					TimeoutMS: c.TimeoutMS,
+					TimeoutMS: c.TimeoutMS, JSSettleMS: c.JSSettleMS, CDPURL: c.CDPURL,
 				})
 				if ctx.Err() != nil {
 					return ctx.Err()
