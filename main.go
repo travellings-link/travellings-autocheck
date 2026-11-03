@@ -443,24 +443,26 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 	if d == nil {
 		return fmt.Errorf("内部错误：写库路径无数据库连接（FromAPI=%v）", cfg.FromAPI)
 	}
-	// 占比闸门(--limit 时禁用)
+	// 占比闸门(--limit 时禁用)。闸门+写回是 bot run 与 master 共用逻辑（report.Finalize），
+	// 此处只保留 --limit 的旁路：调试/灰度轮跳过占比、直接写回。
 	if cfg.Limit > 0 {
 		log.Info().Int("limit", cfg.Limit).Msg("--limit 生效，跳过占比闸门")
-	} else {
-		pct, count := db.RunStats(report.Updates(verdicts))
-		log.Info().Float64("run_pct", pct).Int("sites", count).Msg("RUN 占比")
-		if pct < cfg.MinPct {
-			log.Warn().Float64("min_pct", cfg.MinPct).Msg("低于阈值，本轮结果丢弃不写库")
+		if err := report.Write(d, verdicts); err != nil {
 			notify(false)
-			return nil
+			return fmt.Errorf("write verdicts: %w", err)
 		}
+		notify(true)
+		return nil
 	}
-	ups := report.Updates(verdicts)
-	if err := db.WriteVerdicts(d, ups); err != nil {
+	written, err := report.Finalize(d, verdicts, cfg.MinPct)
+	if !written {
+		if err != nil {
+			notify(false)
+			return fmt.Errorf("write verdicts: %w", err)
+		}
 		notify(false)
-		return fmt.Errorf("write verdicts: %w", err)
+		return nil
 	}
-	log.Info().Int("sites", len(ups)).Msg("已写回")
 	notify(true)
 	return nil
 }
