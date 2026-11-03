@@ -1,4 +1,4 @@
-package main
+package feishu
 
 import (
 	"context"
@@ -22,7 +22,7 @@ func TestFeishuSkipsWithoutWebhook(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("FEISHU_WEBHOOK", "")
-	if err := notifyFeishu(context.Background(), buildFeishuCard(nil, time.Second, false)); err != nil {
+	if err := Notify(context.Background(), BuildCard(nil, time.Second, false)); err != nil {
 		t.Fatalf("未配置应静默跳过，得到错误: %v", err)
 	}
 	if called {
@@ -51,7 +51,7 @@ func TestFeishuCardCarriesPatrolKeyword(t *testing.T) {
 		{SiteID: 5, Status: check.Timeout, NavTimeout: "nav timeout", Name: "slow", URL: "https://slow.example"},
 		{SiteID: 9, Status: check.Error, InfraErr: "attach cdp: connection refused", Name: "brk", URL: "https://brk.example"},
 	}
-	if err := notifyFeishu(context.Background(), buildFeishuCard(vs, 37*time.Minute, true)); err != nil {
+	if err := Notify(context.Background(), BuildCard(vs, 37*time.Minute, true)); err != nil {
 		t.Fatalf("发送失败: %v", err)
 	}
 	if got.MsgType != "interactive" {
@@ -88,14 +88,14 @@ func TestFeishuTemplateReflectsWrite(t *testing.T) {
 		written bool
 		want    string
 	}{{true, "green"}, {false, "red"}, {false, "red"}} {
-		b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, c.written))
+		b, _ := json.Marshal(BuildCard(vs, time.Minute, c.written))
 		if !strings.Contains(string(b), "\"template\":\""+c.want+"\"") {
 			t.Fatalf("written=%v 应 template=%s，得到: %s", c.written, c.want, b)
 		}
 	}
 	// 高占比但没写库：必须还是 red（质量指标不能抢闭环状态的位）
 	high := []pipeline.Verdict{{SiteID: 1, Status: check.Run, Name: "a", URL: "https://a"}}
-	b, _ := json.Marshal(buildFeishuCard(high, time.Minute, false))
+	b, _ := json.Marshal(BuildCard(high, time.Minute, false))
 	if !strings.Contains(string(b), "red") {
 		t.Fatalf("未写库的满分轮也应 red: %s", b)
 	}
@@ -104,11 +104,11 @@ func TestFeishuTemplateReflectsWrite(t *testing.T) {
 // schema V2 不支持 note 元素（线上实测 code=11246 拒绝）：溢出截断路径
 // 也必须只用 markdown/hr/table/chart。
 func TestFeishuNoNoteElement(t *testing.T) {
-	vs := make([]pipeline.Verdict, 0, feishuMaxRows+5)
-	for i := 0; i < feishuMaxRows+5; i++ {
+	vs := make([]pipeline.Verdict, 0, MaxRows+5)
+	for i := 0; i < MaxRows+5; i++ {
 		vs = append(vs, pipeline.Verdict{SiteID: i + 1, Status: check.Error, InfraErr: "attach cdp", Name: "x", URL: "https://x"})
 	}
-	b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, false))
+	b, _ := json.Marshal(BuildCard(vs, time.Minute, false))
 	if strings.Contains(string(b), "\"note\"") {
 		t.Fatalf("载荷仍含 note 元素（V2 会 11246 拒绝）: %s", b)
 	}
@@ -124,7 +124,7 @@ func TestFeishuNonZeroCodeIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("FEISHU_WEBHOOK", srv.URL)
-	err := notifyFeishu(context.Background(), buildFeishuCard(nil, time.Second, false))
+	err := Notify(context.Background(), BuildCard(nil, time.Second, false))
 	if err == nil {
 		t.Fatal("非零 code 必须返回错误")
 	}
@@ -139,7 +139,7 @@ func TestFeishuTableOnlyWhenInfraUnlisted(t *testing.T) {
 		{SiteID: 3, Status: check.Timeout, NavTimeout: "nav timeout", Name: "c", URL: "https://c"},
 		{SiteID: 4, Status: check.Verdict("503"), Name: "d", URL: "https://d"},
 	}
-	b, _ := json.Marshal(buildFeishuCard(vs, time.Minute, false))
+	b, _ := json.Marshal(BuildCard(vs, time.Minute, false))
 	s := string(b)
 	if strings.Contains(s, "\"table\"") || strings.Contains(s, "未被自动归类识别") {
 		t.Fatalf("无 InfraErr 时不应出表格，得到: %s", s)

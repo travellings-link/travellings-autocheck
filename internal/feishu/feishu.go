@@ -1,4 +1,8 @@
-package main
+// Package feishu 生成并发送巡查报告的飞书交互卡片。
+//
+// 从 package main 抽出（MS 重构 A-3）。logger 经 SetLogger 注入，与 pipeline/crawl
+// 同一模式——包内不依赖根包的全局 log，避免测试与库用法被启动顺序绑架。
+package feishu
 
 import (
 	"bytes"
@@ -14,8 +18,17 @@ import (
 	"time"
 
 	"travellings-bot-go/check"
+	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
+
+	"github.com/rs/zerolog"
 )
+
+// pkglog 由 SetLogger 注入；未注入时静默（与 pipeline 包同款约定）。
+var pkglog = zerolog.Nop()
+
+// SetLogger 让调用方把配置好的 logger 传进来，跳过通知的 Debug 才能落对出口。
+func SetLogger(l zerolog.Logger) { pkglog = l }
 
 // 飞书群机器人通知（自定义机器人 webhook，交互卡片）。
 // 两条硬约束：
@@ -25,7 +38,7 @@ import (
 
 // 明细表最多展示的问题站数：webhook 载荷有体积上限，且刷屏比信息缺失更糟；
 // 完整清单永远在终端报告 / --format json 里。
-const feishuMaxRows = 20
+const MaxRows = 20 // 明细表最多展示的问题站数：webhook 载荷有体积上限，刷屏比信息缺失更糟
 
 type cardText struct {
 	Tag     string `json:"tag"`
@@ -103,16 +116,16 @@ type cardHeader struct {
 	Padding  string   `json:"padding"`
 }
 
-type feishuCard struct {
+type Card struct {
 	Schema string         `json:"schema"`
 	Config map[string]any `json:"config"`
 	Header cardHeader     `json:"header"`
 	Body   map[string]any `json:"body"`
 }
 
-// buildFeishuCard 生成巡查报告卡片：柱图看分布、明细表给原因。
+// BuildCard 生成巡查报告卡片：柱图看分布、明细表给原因。
 // 计数口径与终端报告一致（IGNORE 不混进正常状态）；RUN 站点不进明细表。
-func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool) feishuCard {
+func BuildCard(vs []pipeline.Verdict, elapsed time.Duration, written bool) Card {
 	runN, lostN, errN, tmoN, httpN, ignoreN := 0, 0, 0, 0, 0, 0
 	for _, v := range vs {
 		if v.Ignored() {
@@ -179,7 +192,7 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		}
 		rows = append(rows, tableRow{
 			ID: v.SiteID, Name: name, URL: v.URL,
-			Error: truncate(strings.ReplaceAll(v.InfraErr, "\n", " "), 120),
+			Error: ui.Truncate(strings.ReplaceAll(v.InfraErr, "\n", " "), 120),
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
@@ -197,8 +210,8 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 			cardElement{Tag: "markdown", Content: fmt.Sprintf("以下 %d 个站点的失败**未被自动归类识别**，疑似工具链问题（本轮结论未写库）：", len(rows)), Margin: "0px 0px 0px 0px"},
 		)
 		shown := rows
-		if len(shown) > feishuMaxRows {
-			shown = shown[:feishuMaxRows]
+		if len(shown) > MaxRows {
+			shown = shown[:MaxRows]
 		}
 		elements = append(elements, tableElement{
 			Tag: "table",
@@ -212,9 +225,9 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 			HeaderStyle: map[string]any{"background_style": "grey", "bold": true, "lines": 1},
 			PageSize:    5, Margin: "0px 0px 0px 0px",
 		})
-		if len(rows) > feishuMaxRows {
+		if len(rows) > MaxRows {
 			elements = append(elements, cardElement{Tag: "markdown",
-				Content: fmt.Sprintf("未归类工具链错误共 %d 条，仅展示前 %d 条；完整清单见运行日志或 --format json", len(rows), feishuMaxRows),
+				Content: fmt.Sprintf("未归类工具链错误共 %d 条，仅展示前 %d 条；完整清单见运行日志或 --format json", len(rows), MaxRows),
 				Margin:  "0px 0px 0px 0px",
 			})
 		}
@@ -224,7 +237,7 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 		template = "green"
 	}
 
-	return feishuCard{
+	return Card{
 		Schema: "2.0",
 		Config: map[string]any{"update_multi": true},
 		Header: cardHeader{
@@ -237,12 +250,12 @@ func buildFeishuCard(vs []pipeline.Verdict, elapsed time.Duration, written bool)
 	}
 }
 
-// notifyFeishu POST 交互卡片到群机器人 webhook。
+// Notify POST 交互卡片到群机器人 webhook。
 // 未配置 FEISHU_WEBHOOK 直接返回 nil（跳过）；失败只报告，不推翻巡查结果。
-func notifyFeishu(ctx context.Context, card feishuCard) error {
+func Notify(ctx context.Context, card Card) error {
 	hook := os.Getenv("FEISHU_WEBHOOK")
 	if hook == "" {
-		log.Debug().Msg("未配置 FEISHU_WEBHOOK，跳过飞书通知")
+		pkglog.Debug().Msg("未配置 FEISHU_WEBHOOK，跳过飞书通知")
 		return nil
 	}
 	body, err := json.Marshal(map[string]any{"msg_type": "interactive", "card": card})
@@ -264,7 +277,7 @@ func notifyFeishu(ctx context.Context, card feishuCard) error {
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("feishu webhook: http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+		return fmt.Errorf("feishu webhook: http %d: %s", resp.StatusCode, ui.Truncate(string(raw), 200))
 	}
 	var r struct {
 		Code       int    `json:"code"`
@@ -272,7 +285,7 @@ func notifyFeishu(ctx context.Context, card feishuCard) error {
 		Msg        string `json:"msg"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return fmt.Errorf("feishu 响应解析失败: %s: %w", truncate(string(raw), 200), err)
+		return fmt.Errorf("feishu 响应解析失败: %s: %w", ui.Truncate(string(raw), 200), err)
 	}
 	if r.Code != 0 || r.StatusCode != 0 {
 		return fmt.Errorf("feishu 拒绝: code=%d StatusCode=%d msg=%s", r.Code, r.StatusCode, r.Msg)

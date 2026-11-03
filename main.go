@@ -17,6 +17,7 @@ import (
 	"travellings-bot-go/check"
 	"travellings-bot-go/crawl"
 	"travellings-bot-go/db"
+	"travellings-bot-go/internal/feishu"
 	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
 
@@ -194,6 +195,7 @@ func setupLog(verbose bool) *zerolog.Logger {
 	log = l
 	pipeline.SetLogger(l) // 管线内部（抓取/渲染/判定）的 debug 也走同一出口
 	crawl.SetLogger(l)    // crawl 包（CDP 回退等告警）也走同一出口
+	feishu.SetLogger(l)   // 跳过通知的 Debug 也走同一出口
 
 	// 接管标准库 log：net/http 等库在内部直接 log.Printf 写 os.Stderr
 	// （如 transport.go 的 "Unsolicited response received on idle HTTP channel"），
@@ -621,7 +623,7 @@ func runOnce(ctx context.Context, cfg runConfig) error {
 
 	// 通知：跑完就发（webhook 未配置则内部静默跳过），标题色 = 本轮是否实际写库。
 	notify := func(written bool) {
-		if err := notifyFeishu(ctx, buildFeishuCard(verdicts, elapsed, written)); err != nil {
+		if err := feishu.Notify(ctx, feishu.BuildCard(verdicts, elapsed, written)); err != nil {
 			log.Error().Err(err).Msg("飞书通知发送失败")
 		} else {
 			log.Info().Bool("written", written).Msg("飞书通知已发送")

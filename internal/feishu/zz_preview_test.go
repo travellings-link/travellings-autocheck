@@ -1,4 +1,4 @@
-package main
+package feishu
 
 import (
 	"encoding/json"
@@ -15,9 +15,9 @@ import (
 // 生成两份样例便于在 open.feishu.cn 卡片预览器里直接打开对照；
 // webhook 实际发送用的是 dsl 本体 + msg_type=interactive 外层（见 webhook 产物）。
 type cardFile struct {
-	Name      string     `json:"name"`
-	DSL       feishuCard `json:"dsl"`
-	Variables []cardVar  `json:"variables"`
+	Name      string    `json:"name"`
+	DSL       Card      `json:"dsl"`
+	Variables []cardVar `json:"variables"`
 }
 type cardVar struct {
 	Type     string `json:"type"`
@@ -27,7 +27,7 @@ type cardVar struct {
 	MockData string `json:"mockData"`
 }
 
-func writeCardFile(name string, card feishuCard) {
+func writeCardFile(name string, card Card) {
 	b, _ := json.Marshal(cardFile{
 		Name:      "开往巡查",
 		DSL:       card,
@@ -64,7 +64,7 @@ func TestZZWritePreview(t *testing.T) {
 	add(check.Verdict("403"), 233, "cf", "HTTP 403", false, false)
 	add(check.Lost, 61, "lost", "no entry after render", false, false)
 	add(check.Run, 9, "infra", "infra js-leg: attach cdp", true, false)
-	writeCardFile("autocheck-report.card", buildFeishuCard(vs, 1*time.Hour+23*time.Minute+46*time.Second, true))
+	writeCardFile("autocheck-report.card", BuildCard(vs, 1*time.Hour+23*time.Minute+46*time.Second, true))
 }
 func itoa(n int) string {
 	return fmt.Sprint(n)
