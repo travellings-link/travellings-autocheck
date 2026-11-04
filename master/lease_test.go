@@ -20,25 +20,39 @@ func TestReclaimReturnsTaskToQueue(t *testing.T) {
 	now, cur := fixedClock()
 	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1", Name: "n1"}}, 1)
 	r.SetLease(30*time.Second, 30*time.Second, now)
-	r.SetPullMaxWait(50 * time.Millisecond) // 空腿时快速回空批，不挂 10 分钟
 	old := pull1(t, r, mspb.Lane_LANE_HTTP) // 第一次派发，记住其 nonce
 	if got := r.Reclaim(now().Add(10 * time.Second)); got != 0 {
 		t.Fatalf("未到期不该回收, got %d", got)
 	}
-	// 空腿未收口：挂起到上限后回空批（惊群语义：不立即返回、也不永久吊住）。
-	st := time.Now()
-	pr, err := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
-	if err != nil || len(pr.GetTasks()) != 0 {
-		t.Fatalf("空腿应挂起后回空批: err=%v n=%d", err, len(pr.GetTasks()))
+	// 空腿未收口：Pull 无限挂起——不响应、不回空批，直到状态可确定（用户设计）。
+	held := make(chan *mspb.PullResponse, 1)
+	go func() {
+		pr, err := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+		if err != nil {
+			t.Errorf("held pull: %v", err)
+		}
+		held <- pr
+	}()
+	select {
+	case <-held:
+		t.Fatal("空腿 Pull 不该返回（新契约：无限挂起到状态确定）")
+	case <-time.After(150 * time.Millisecond):
 	}
-	if elapsed := time.Since(st); elapsed < 40*time.Millisecond {
-		t.Fatalf("空批回得太快（没挂起？），elapsed=%v", elapsed)
-	}
+	// 租约到期回收 → 回灌本腿队列 → 挂起的 Pull 被唤醒并领到重派任务。
 	*cur = now().Add(31 * time.Second)
 	if got := r.Reclaim(*cur); got != 1 {
 		t.Fatalf("到期应回收 1 条, got %d", got)
 	}
-	fresh := pull1(t, r, mspb.Lane_LANE_HTTP) // 重派：新 nonce
+	var pr *mspb.PullResponse
+	select {
+	case pr = <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("回收后挂起 Pull 未被唤醒（惊群未消或信号丢失）")
+	}
+	if len(pr.GetTasks()) != 1 {
+		t.Fatalf("挂起 Pull 应被唤醒并领到 1 条, got %d", len(pr.GetTasks()))
+	}
+	fresh := pr.GetTasks()[0] // 重派：新 nonce
 	if fresh.GetName() != "n1" || fresh.GetNonce() == old.GetNonce() {
 		t.Fatalf("重派应保留 name 且 nonce 更新, got name=%q nonce=%d/%d", fresh.GetName(), fresh.GetNonce(), old.GetNonce())
 	}
@@ -60,7 +74,6 @@ func TestReclaimBudgetTerminates(t *testing.T) {
 	now, cur := fixedClock()
 	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1"}}, 1)
 	r.SetLease(10*time.Second, 10*time.Second, now)
-	r.SetPullMaxWait(30 * time.Millisecond) // 末轮 Pull 走超时空批路径也要快
 	// HTTP 腿预算 retryTransient=1 → 第 2 次回收（recycles=2>1）终结。
 	for i := 0; i < 2; i++ {
 		pull1(t, r, mspb.Lane_LANE_HTTP)

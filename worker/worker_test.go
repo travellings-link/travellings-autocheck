@@ -38,13 +38,12 @@ func seedRound(t *testing.T, batch int) (*grpc.ClientConn, *master.Round, func()
 	return conn, round, func() { conn.Close(); srv.Stop() }
 }
 
-// M1 验收①（惊群语义更新版）：好 token 领任务（batch=workers×1）；坏 token 拒；
-// 空腿未收口的 Pull 必须挂起到 pullMax 才回空批（旧契约秒回空批才是逼轮询的根因）；
-// 回传须带 nonce；收口后 Pull 立即拿到哨兵（广播，不等 pullMax）。
+// M1 验收①（惊群语义·无限挂起版）：好 token 领任务（batch=workers×1）；坏 token 拒；
+// 空腿未收口时 Pull **不返回**（hold 到状态可确定——既不回空批也不断链）；
+// 回传须带 nonce；全部终结后，挂起的 Pull 被收口广播唤醒、拿到哨兵。
 func TestHandshakeSentinelToken(t *testing.T) {
-	conn, round, stop := seedRound(t, 1)
+	conn, _, stop := seedRound(t, 1)
 	defer stop()
-	round.SetPullMaxWait(80 * time.Millisecond) // 否则空腿按生产默认挂满 10 分钟
 	ctx := context.Background()
 	cli := mspb.NewCheckClient(conn)
 	withTok := func(tk string) context.Context {
@@ -70,16 +69,19 @@ func TestHandshakeSentinelToken(t *testing.T) {
 	}
 	task2 := p2.GetTasks()[0]
 
-	st := time.Now()
-	idle, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
-	if err != nil {
-		t.Fatalf("pull while inflight: %v", err)
-	}
-	if idle.GetAction() != mspb.Action_ASSIGN || len(idle.GetTasks()) != 0 {
-		t.Fatalf("want empty ASSIGN while inflight, got action=%v n=%d", idle.GetAction(), len(idle.GetTasks()))
-	}
-	if held := time.Since(st); held < 60*time.Millisecond {
-		t.Fatalf("空腿 Pull 没挂起（elapsed=%v），惊群未消", held)
+	// 队列空、2 条在途未收口：Pull 必须 hold 住不返回（用户设计：不响应也不断）。
+	heldCh := make(chan *mspb.PullResponse, 1)
+	go func() {
+		pr, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+		if err != nil {
+			t.Errorf("held pull: %v", err)
+		}
+		heldCh <- pr
+	}()
+	select {
+	case pr := <-heldCh:
+		t.Fatalf("空腿 Pull 不该返回（新契约无限挂起），got action=%v n=%d", pr.GetAction(), len(pr.GetTasks()))
+	case <-time.After(150 * time.Millisecond):
 	}
 
 	for _, task := range []*mspb.Task{task1, task2} {
@@ -90,16 +92,19 @@ func TestHandshakeSentinelToken(t *testing.T) {
 			t.Fatalf("report: %v", err)
 		}
 	}
+	// 收口 → 广播唤醒那个挂起的 Pull：它拿到哨兵（这就是"状态可确定才响应"）。
 	st2 := time.Now()
-	done, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
-	if err != nil {
-		t.Fatalf("pull after close: %v", err)
+	var done *mspb.PullResponse
+	select {
+	case done = <-heldCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("收口后挂起的 Pull 未被广播唤醒")
 	}
 	if done.GetAction() != mspb.Action_ROUND_DONE {
 		t.Fatalf("want ROUND_DONE sentinel, got %v", done.GetAction())
 	}
-	if time.Since(st2) > 50*time.Millisecond {
-		t.Fatal("收口后的 Pull 应被广播立即唤醒，不该等 pullMax")
+	if time.Since(st2) > 100*time.Millisecond {
+		t.Fatalf("哨兵送达太慢（%v），疑似靠轮询而非事件", time.Since(st2))
 	}
 }
 

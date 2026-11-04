@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 
 	"travellings-bot-go/check"
@@ -48,7 +49,17 @@ type Options struct {
 
 // Dial 连 master（v1 不加密、insecure 传输，内网/隧道口径 D6）。conn 由调用方 Close。
 func Dial(ctx context.Context, o Options) (*grpc.ClientConn, error) {
-	dopts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	dopts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// Pull 无限挂起后，「连接半死」（NAT 静默掐会话、对端宕机无 FIN）必须由传输层判死：
+		// 每 30s HTTP2 ping，20s 无应答即断链 → 挂起的 Pull ctx 取消 → 上层按 D8 重连。
+		// PermitWithoutStream=true：挂起等待期没有活跃流，ping 也必须照发。
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             20 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	}
 	if o.Dialer != nil {
 		dopts = append(dopts, grpc.WithContextDialer(o.Dialer))
 	}
@@ -207,10 +218,9 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 				}
 				tasks := pr.GetTasks()
 				if len(tasks) == 0 {
-					// 空批只可能是 master 侧 pullMax 挂起到点（活还捏在别的腿/worker 手里）。
-					// 立即重拉即可——新 Pull 又在 master 挂起，worker 侧**不需要任何轮询计时器**，
-					// 这就是惊群治理的落点（此前的 1s 空转轮询已删除）。
-					// 绝不在此退出：退出信号只有哨兵（D7）。
+					// 防御分支：新契约下 master 不再回空批（Pull 无限挂起到状态确定），
+					// 走到这里只可能是对端为旧版 master。视同「继续等」，不退出——
+					// 退出信号只有哨兵（D7）。
 					continue
 				}
 				for _, t := range tasks {

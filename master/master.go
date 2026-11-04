@@ -25,11 +25,6 @@ import (
 const (
 	retryTransient = 1 // 仅源于 HTTP 腿的 ERROR/TIMEOUT
 	retryIgnore    = 5 // 仅源于 Browser 腿的 IGNORE（工具链故障/站点超时，皆不写库）
-
-	// defaultPullMaxWait：空队列时 Pull 的最长挂起时间（开发组裁决：10 分钟）。
-	// 到点回空批，防中间设备掐断/静默断流把 worker 永久吊住；worker 收到空批立即再拉
-	// （新 Pull 又在 master 侧挂起），故无需任何轮询计时器。
-	defaultPullMaxWait = 10 * time.Minute
 )
 
 func laneIdx(l mspb.Lane) int {
@@ -68,13 +63,15 @@ type Round struct {
 	// 确保未接线的运行/测试行为零变化）。
 	leaseHTTP, leaseBrowser time.Duration
 	now                     func() time.Time // 时钟，测试可注入假时钟
-	pullMax                 time.Duration    // 空队列 Pull 的最长挂起
 	dispatchSeq             uint64           // per-dispatch 计数器（持锁递增）
 
 	// 惊群治理的唤醒原语（开发组裁决：挂起 Pull 而非让其轮询）。
-	wake            chan struct{} // 容量 1 的广播：队列有变化 / 收口
-	closedCh        chan struct{} // 收口瞬间关闭，唤醒全部挂起 Pull
-	closedAnnounced bool          // closedCh 只关一次
+	// wake 必须按腿各一颗：共享一颗时 select 随机挑接收者，回灌 HTTP 腿的信号
+	// 可能被挂在渲染腿的 Pull 抢走（空醒后 HTTP 腿再无信号、任务永久滞留——
+	// 树莓派实测「30/31 卡住不派发」即此；无限挂起下更必须按腿隔离）。
+	wake            [2]chan struct{} // 每腿容量 1：该腿队列有变化
+	closedCh        chan struct{}    // 收口瞬间关闭，唤醒全部挂起 Pull
+	closedAnnounced bool             // closedCh 只关一次
 
 	pulls atomic.Int64 // 累计 Pull RPC 次数：对照回归里量化「轮询风暴是否消掉」
 
@@ -101,8 +98,7 @@ func NewRound(token string, seed []*mspb.Task, batch int) *Round {
 		sites:    make(map[int32]*siteState),
 		final:    make([]*mspb.Verdict, 0, len(seed)),
 		now:      time.Now,
-		pullMax:  defaultPullMaxWait,
-		wake:     make(chan struct{}, 1),
+		wake:     [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)},
 		closedCh: make(chan struct{}),
 	}
 	for _, t := range seed {
@@ -130,13 +126,6 @@ func (r *Round) SetLease(httpLease, browserLease time.Duration, now func() time.
 	}
 }
 
-// SetPullMaxWait 覆盖空队列 Pull 的挂起上限（mscmd 的 --pull-max-wait）；<=0 忽略。
-func (r *Round) SetPullMaxWait(d time.Duration) {
-	if d > 0 {
-		r.pullMax = d
-	}
-}
-
 // PullCount 返回累计 Pull RPC 次数。对照回归用它量化惊群：轮询时代次数≈站数×轮询频率，
 // 长挂时代只随「真正有活可派/收口」增长。
 func (r *Round) PullCount() int64 { return r.pulls.Load() }
@@ -155,12 +144,12 @@ func (r *Round) checkToken(ctx context.Context) error {
 
 func (r *Round) closedLocked() bool { return r.responded >= r.total }
 
-// signalLocked 非阻塞广播「队列有变化」，唤醒挂起的 Pull。调用方须持锁。
-// 容量 1 + default 分支：多次入队合并成一次唤醒，唤醒后各 Pull 重查自己的腿，
-// 拿不到就再挂起——内部唤醒不是 RPC，不存在放大。
-func (r *Round) signalLocked() {
+// signalLocked 非阻塞给第 lane 腿递一颗唤醒信号。调用方须持锁。
+// 容量 1 + default：多次入队合并成一次唤醒；被唤醒的 Pull 若见队列仍有多余任务，
+// 会在 assign 后再补一颗（接力），保证同腿多个挂起 Pull 不漏。
+func (r *Round) signalLocked(lane int) {
 	select {
-	case r.wake <- struct{}{}:
+	case r.wake[lane] <- struct{}{}:
 	default:
 	}
 }
@@ -185,15 +174,15 @@ func (r *Round) announceClosedLocked() {
 // enqueueLocked 把任务放回某腿待派队列并广播唤醒。调用方须持锁。
 func (r *Round) enqueueLocked(lane int, t *mspb.Task) {
 	r.queue[lane] = append(r.queue[lane], t)
-	r.signalLocked()
+	r.signalLocked(lane)
 }
 
 // Pull：worker 按腿领一批。
 //   - 已收口 → ROUND_DONE（D7，唯一退出信号）
-//   - 该腿队列暂空但未收口 → **挂起**本次 Pull，直到有新任务回灌（唤醒回循环）、
-//     收口（→哨兵）、挂起上限 pullMax 到点（→空批）或 worker 侧取消。
-//     这就是惊群治理：把「worker 每秒轮询空队列」换成「master 有状态变化才回应」。
-//     空批只可能是 pullMax 超时，worker 收到后立即重拉（新 Pull 又挂起），零轮询计时器。
+//   - 该腿队列暂空但未收口 → **无限挂起**本次 Pull，直到状态可确定才响应（用户设计）：
+//     有新任务回灌（本腿信号→重查领活）、或本轮真的结束（收口→哨兵）。
+//     不响应、也不主动断开回空批—— worker 侧因此零轮询计时器、零空转 RPC。
+//     连接半死的探活交给传输层 keepalive（worker.Dial），不拿业务层超时冒充探活。
 //   - 绝不把「队列空」当收口——那会丢在途站（M1 冒烟实测过）。
 func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResponse, error) {
 	r.pulls.Add(1)
@@ -213,23 +202,20 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 		}
 		if len(r.queue[i]) > 0 {
 			out := r.assignLocked(i, int(req.GetWant()))
+			if len(r.queue[i]) > 0 {
+				r.signalLocked(i) // 队列仍有多余：接力唤醒下一个挂起 Pull
+			}
 			r.mu.Unlock()
 			return out, nil
 		}
-		maxWait := r.pullMax
 		r.mu.Unlock() // 挂起期间绝不持锁，否则 Report/Reclaim 全部堵死
 
-		timer := time.NewTimer(maxWait)
 		select {
-		case <-r.wake: // 队列变化：重查
-		case <-r.closedCh: // 收口：下一轮循环立即返回哨兵
-		case <-timer.C: // 挂起上限：回空批，worker 立即重拉（防静默断流永久吊住）
-			return &mspb.PullResponse{Action: mspb.Action_ASSIGN}, nil
-		case <-ctx.Done(): // worker 断开/进程退出：让 RPC 正常收尾
-			timer.Stop()
+		case <-r.wake[i]: // 本腿有新任务：回循环重查并领活
+		case <-r.closedCh: // 本轮结束：回循环立即返回哨兵
+		case <-ctx.Done(): // worker 断开/进程退出/keepalive 判死：让 RPC 收尾
 			return nil, status.FromContextError(ctx.Err()).Err()
 		}
-		timer.Stop()
 	}
 }
 

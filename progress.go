@@ -81,9 +81,10 @@ func newProgress(total int, stats *pipeline.StageStats, verbose bool) *progressV
 	return p
 }
 
-// newMasterProgress 给 bot master 画三条队列进度（爬取队列/渲染队列/所有任务）。
-// snap = master.Round.Snapshot：两腿各自的「累计派发/累计任务数(已派+待派)」+ 累计回传。
-// 分母会随重试回灌增长——「所有任务 400/1600」这种分母远大于首轮清单是设计口径。
+// newMasterProgress 给 bot master 画五行进度（两腿各「派发/响应」+ 所有任务）。
+// 派发条：分子=该腿累计已派发，分母=累计任务数（已派+待派）；
+// 响应条：分子=该腿已认账，分母=对应派发条的分子——「派出去的回来多少」，差值即在途。
+// 「所有任务」= 两腿响应之和 / 两腿派发之和（同规则合计行）。分母随重试回灌增长。
 func newMasterProgress(snap func() master.Progress, verbose bool) *progressView {
 	p := &progressView{
 		w:       os.Stderr,
@@ -96,10 +97,12 @@ func newMasterProgress(snap func() master.Progress, verbose bool) *progressView 
 		return []string{
 			ui.ColorizeTo(os.Stderr, ui.Bold, "开往巡查 · 主从") + "  " + now.Sub(p.start).Round(time.Second).String(),
 			p.barLine("爬取派发", s.HTTPDisp, s.HTTPTotal, 8),
-			p.barLine("爬取响应", s.HTTPDone, s.HTTPTotal, 8),
+			p.barLine("爬取响应", s.HTTPDone, s.HTTPDisp, 8),
 			p.barLine("渲染派发", s.BrowserDisp, s.BrowserTotal, 8),
-			p.barLine("渲染响应", s.BrowserDone, s.BrowserTotal, 8),
-			p.barLine("所有任务", s.Reports, s.HTTPTotal+s.BrowserTotal, 8),
+			p.barLine("渲染响应", s.BrowserDone, s.BrowserDisp, 8),
+			// 响应条分母=对应派发条的分子（用户口径）：回答「派出去的回来多少」，
+			// 差值即在途；派发条分母仍是累计任务数（已派+待派）。
+			p.barLine("所有任务", s.Reports, s.HTTPDisp+s.BrowserDisp, 8),
 		}
 	}
 	return p
