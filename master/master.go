@@ -21,10 +21,13 @@ import (
 	mspb "travellings-bot-go/proto/mspb"
 )
 
-// 重试预算（用户裁决：ERROR/TIMEOUT 重派 1 次、IGNORE 重派 5 次）。
+// 重试预算（用户裁决 D15：ERROR/TIMEOUT 重派 1 次、IGNORE 重派 5 次）。
+// defaultHTTPRetries 是默认值不是常量——HTTP 腿预算可经 --http-retries 参数化：
+// 单机 bot run 的 HTTP 腿从不重试（retryCh 只服务渲染腿），主从 vs 单机性能
+// 基准须设 0 消除这一独有语义，否则派发数会因重试虚增、尾批多一道栅栏。
 const (
-	retryTransient = 1 // 仅源于 HTTP 腿的 ERROR/TIMEOUT
-	retryIgnore    = 5 // 仅源于 Browser 腿的 IGNORE（工具链故障/站点超时，皆不写库）
+	defaultHTTPRetries = 1 // 仅源于 HTTP 腿的 ERROR/TIMEOUT
+	retryIgnore        = 5 // 仅源于 Browser 腿的 IGNORE（工具链故障/站点超时，皆不写库）
 )
 
 func laneIdx(l mspb.Lane) int {
@@ -56,8 +59,9 @@ type siteState struct {
 type Round struct {
 	mspb.UnimplementedCheckServer
 
-	token string
-	batch int // >0 封顶单次派发（测试用）；0 由 worker want 决定（D10）
+	token       string
+	batch       int // >0 封顶单次派发（测试用）；0 由 worker want 决定（D10）
+	httpRetries int // HTTP 腿 ERROR/TIMEOUT 重派预算；默认 1（D15）；基准对齐单机设 0
 
 	// 租约时长（D11，按腿）。<=0 = 该腿不回收（不调 SetLease 时的安全默认，
 	// 确保未接线的运行/测试行为零变化）。
@@ -94,7 +98,7 @@ type Round struct {
 func NewRound(token string, seed []*mspb.Task, batch int) *Round {
 	q := make([]*mspb.Task, 0, len(seed)) // cap 预分配；用 len 会塞进 nil 任务（测试实测踩过）
 	r := &Round{
-		token: token, batch: batch,
+		token: token, batch: batch, httpRetries: defaultHTTPRetries,
 		sites:    make(map[int32]*siteState),
 		final:    make([]*mspb.Verdict, 0, len(seed)),
 		now:      time.Now,
@@ -116,6 +120,14 @@ func NewRound(token string, seed []*mspb.Task, batch int) *Round {
 // OnClose 在收口瞬间触发一次（M2 在此接闸门→写库→通知；须 NewRound 后、Serve 前设置；
 // 回调在独立 goroutine 执行，不持 r.mu）。
 func (r *Round) OnClose(f func()) { r.onClose = f }
+
+// SetHTTPRetries 设 HTTP 腿 ERROR/TIMEOUT 重派预算（--http-retries；基准对齐单机设 0）。
+// 负数忽略；须在 Serve 前调用（与 SetLease 同族配置 setter，初始化期无并发）。
+func (r *Round) SetHTTPRetries(n int) {
+	if n >= 0 {
+		r.httpRetries = n
+	}
+}
 
 // SetLease 设定两腿租约时长与可选时钟（mscmd 在 Serve 前调用；测试注入假时钟）。
 // d<=0 的腿不参与回收。未调用则两腿都=0、永不回收（默认安全）。
@@ -311,9 +323,9 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
 
-	// HTTP 腿提前断言的 ERROR/TIMEOUT → 回 HTTP 队列重试 ≤1。
+	// HTTP 腿提前断言的 ERROR/TIMEOUT → 回 HTTP 队列重试（预算可参数化，0=对齐单机不重试）。
 	if i == 0 && (v.GetStatus() == "ERROR" || v.GetStatus() == "TIMEOUT") {
-		if s.httpDisp-1 < retryTransient {
+		if s.httpDisp-1 < r.httpRetries {
 			r.enqueueLocked(0, &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
 			return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 		}
@@ -348,7 +360,7 @@ func (r *Round) Reclaim(now time.Time) int {
 		s.leased = 0
 		s.nonce = 0 // 作废本次派发凭据：老 worker 之后回传一律不认
 		s.recycles++
-		budget := retryTransient
+		budget := r.httpRetries // HTTP 腿：租约回收与重试共享同一预算
 		if lane == 1 {
 			budget = retryIgnore
 		}

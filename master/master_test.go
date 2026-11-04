@@ -198,3 +198,21 @@ func TestVerdictsTerminalOnly(t *testing.T) {
 		t.Fatalf("收口 final 应 2 条, got %d", len(got))
 	}
 }
+
+// 基准语义（--http-retries 0）：HTTP 腿 ERROR 不重派、直接终结——派发数不再因重试
+// 虚增，与单机 bot run（HTTP 腿从不重试）逐条等价。锁住「参数完全对应单机」的承诺。
+func TestHTTPRetriesZeroMatchesStandalone(t *testing.T) {
+	r := NewRound("t", oneTask(), 0)
+	r.SetHTTPRetries(0)
+	task := pull1(t, r, mspb.Lane_LANE_HTTP)
+	rr, _ := rep(t, r, task, mspb.Lane_LANE_HTTP, &mspb.Verdict{Status: "ERROR", Stage: "raw"})
+	if rr.GetAction() != mspb.Action_ROUND_DONE {
+		t.Fatalf("0 预算下首个 ERROR 即终结收口, got %v", rr.GetAction())
+	}
+	if p := snapStruct(r); p.HTTPDisp != 1 {
+		t.Fatalf("0 预算下不应有第二次派发: disp=%d", p.HTTPDisp)
+	}
+}
+
+// snapStruct 便捷取 master.Progress（回归测里解构五值太啰嗦）。
+func snapStruct(r *Round) Progress { return r.Snapshot() }

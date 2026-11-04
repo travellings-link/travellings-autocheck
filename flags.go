@@ -40,7 +40,8 @@ func addMasterFlags(cmd *cobra.Command, c *masterConfig) {
 	f.DurationVar(&c.ReclaimHTTP, "reclaim-http", 0, "HTTP 租约超时回收；0=--timeout×3（D11）")
 	f.DurationVar(&c.ReclaimBrowser, "reclaim-browser", 0, "Browser 租约超时回收；0=按 js-settle+timeout 推算（D11）")
 
-	f.IntVar(&c.RenderRetries, "render-retries", 2, "渲染重试预算（决策权在 master，M3 接入）")
+	f.IntVar(&c.RenderRetries, "render-retries", 2, "渲染重试预算（决策权在 master）")
+	f.IntVar(&c.HTTPRetries, "http-retries", 1, "HTTP 腿 ERROR/TIMEOUT 重派预算（D15）；0=完全对齐单机（基准测试用）")
 	f.IntVar(&c.TimeoutMS, "timeout", 15000, "单请求超时毫秒数（租约推算用）")
 	f.IntVar(&c.JSSettleMS, "js-settle", 8000, "等待 SPA 挂载上限毫秒数（租约推算用）")
 	f.BoolVar(&c.Write, "write", false, "把判定写回数据库（默认只读不写）")

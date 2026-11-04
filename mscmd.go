@@ -25,13 +25,13 @@ import (
 
 // masterConfig 是 bot master 的参数集（D6/D11/D13）。
 type masterConfig struct {
-	Listen, Token                               string
-	Driver, SQLitePath, DSN                     string
-	ReclaimHTTP, ReclaimBrowser                 time.Duration
-	RenderRetries, TimeoutMS, JSSettleMS, Limit int
-	Write, DryRun, FromAPI                      bool
-	MinPct                                      float64
-	Format                                      string // table|json（json 供与 bot run 逐站对照 diff）
+	Listen, Token                                            string
+	Driver, SQLitePath, DSN                                  string
+	ReclaimHTTP, ReclaimBrowser                              time.Duration
+	RenderRetries, HTTPRetries, TimeoutMS, JSSettleMS, Limit int
+	Write, DryRun, FromAPI                                   bool
+	MinPct                                                   float64
+	Format                                                   string // table|json（json 供与 bot run 逐站对照 diff）
 }
 
 // workerConfig 是 bot worker 的参数集（D5/D9/D10）。
@@ -133,6 +133,7 @@ func masterCmd() *cobra.Command {
 					time.Duration(1+c.RenderRetries) + 10*time.Second
 			}
 			round.SetLease(httpLease, brLease, nil)
+			round.SetHTTPRetries(c.HTTPRetries) // 0 → HTTP 腿零重试，与 bot run 语义逐条等价（基准）
 
 			// 三行进度（爬取/渲染/所有任务）复用 run 的同一组件；仅 TTY 且非 -v 生效。
 			prog := newMasterProgress(round.Snapshot, verbose)
