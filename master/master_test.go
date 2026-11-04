@@ -15,6 +15,12 @@ func tok(s string) context.Context {
 
 func oneTask() []*mspb.Task { return []*mspb.Task{{Id: 1, Url: "u"}} }
 
+// snap5 兼容旧五值解构写法，测试主体不随 Snapshot 返回结构变更而重写。
+func snap5(r *Round) (hd, ht, bd, bt, rep int) {
+	p := r.Snapshot()
+	return p.HTTPDisp, p.HTTPTotal, p.BrowserDisp, p.BrowserTotal, p.Reports
+}
+
 // pull1 从指定腿领 1 条（假定队列非空→立即返回，不会挂起），返回带 nonce 的 task。
 // 调用方把返回的 task 交给 rep，nonce 就自动对得上——测试不手工拼凭据。
 func pull1(t *testing.T, r *Round, lane mspb.Lane) *mspb.Task {
@@ -64,7 +70,7 @@ func TestEscalateGoesBrowser(t *testing.T) {
 	if p, _ := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_BROWSER, Want: 1}); len(p.GetTasks()) != 1 {
 		t.Fatalf("escalate: browser queue want 1 task, got %d", len(p.GetTasks()))
 	}
-	if h, _, _, _, resp := r.Snapshot(); h != 1 || resp != 1 {
+	if h, _, _, _, resp := snap5(r); h != 1 || resp != 1 {
 		t.Fatalf("escalate 后 HTTP 腿应派发1、累计回传1: http=%d reports=%d", h, resp)
 	}
 }
@@ -78,7 +84,7 @@ func TestErrorRetryOnce(t *testing.T) {
 	if rr1.GetAction() != mspb.Action_ASSIGN {
 		t.Fatalf("error retry1: want ASSIGN, got %v", rr1.GetAction())
 	}
-	if _, _, _, _, rp := r.Snapshot(); rp != 1 {
+	if _, _, _, _, rp := snap5(r); rp != 1 {
 		t.Fatalf("error retry1: 累计回传应为1, got %d", rp)
 	}
 	task2 := pull1(t, r, mspb.Lane_LANE_HTTP) // httpDisp=2（回灌后可重领）
@@ -99,7 +105,7 @@ func TestIgnoreRetriesBrowser(t *testing.T) {
 	if rr.GetAction() != mspb.Action_ASSIGN {
 		t.Fatalf("ignore: want ASSIGN(重试), got %v", rr.GetAction())
 	}
-	if _, _, _, _, rp := r.Snapshot(); rp != 2 {
+	if _, _, _, _, rp := snap5(r); rp != 2 {
 		t.Fatalf("ignore: 累计回传应为2(升级+ignore各一次), got %d", rp)
 	}
 	if p, _ := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_BROWSER, Want: 1}); len(p.GetTasks()) != 1 {
@@ -115,6 +121,9 @@ func TestRunTerminates(t *testing.T) {
 	if rr.GetAction() != mspb.Action_ROUND_DONE {
 		t.Fatalf("run: want ROUND_DONE, got %v", rr.GetAction())
 	}
+	if p := r.Snapshot(); p.HTTPDone != 1 || p.BrowserDone != 0 || p.Reports != 1 {
+		t.Fatalf("响应计数应归 HTTP 腿: %+v", p)
+	}
 }
 
 // 迟到/重复/错 nonce 的回传一律丢弃（per-dispatch token 的守卫）。
@@ -124,7 +133,7 @@ func TestStaleNonceDropped(t *testing.T) {
 	// 用错误 nonce 回传：不认账，reports 不推进。
 	_, _ = r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
 		Verdict: &mspb.Verdict{SiteId: 1, Nonce: task.GetNonce() + 999, Status: "RUN", Stage: "raw"}})
-	if _, _, _, _, rp := r.Snapshot(); rp != 0 {
+	if _, _, _, _, rp := snap5(r); rp != 0 {
 		t.Fatalf("错 nonce 回传必须丢弃, reports=%d", rp)
 	}
 	// 正确 nonce 回传：认账。
@@ -137,14 +146,14 @@ func TestStaleNonceDropped(t *testing.T) {
 // Snapshot 口径：分母=已派+待派；升级转 Browser 会新增派发，把两腿分母各自推高。
 func TestSnapshotProgressAccounting(t *testing.T) {
 	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1"}, {Id: 2, Url: "u2"}}, 0)
-	if hd, ht, bd, bt, rep := r.Snapshot(); hd != 0 || ht != 2 || bd != 0 || bt != 0 || rep != 0 {
+	if hd, ht, bd, bt, rep := snap5(r); hd != 0 || ht != 2 || bd != 0 || bt != 0 || rep != 0 {
 		t.Fatalf("初始: got %d/%d %d/%d rep=%d", hd, ht, bd, bt, rep)
 	}
 	t1 := pull1(t, r, mspb.Lane_LANE_HTTP)
 	rep(t, r, t1, mspb.Lane_LANE_HTTP, &mspb.Verdict{Status: "LOST", Escalate: true}) // 1 号升级
 	t2 := pull1(t, r, mspb.Lane_LANE_HTTP)
 	rep(t, r, t2, mspb.Lane_LANE_HTTP, &mspb.Verdict{Status: "LOST", Escalate: true}) // 2 号升级
-	hdp, htp, bdp, btp, rr := r.Snapshot()
+	hdp, htp, bdp, btp, rr := snap5(r)
 	if hdp != 2 || htp != 2 || rr != 2 {
 		t.Fatalf("HTTP 腿后: http=%d/%d rep=%d", hdp, htp, rr)
 	}
@@ -155,7 +164,7 @@ func TestSnapshotProgressAccounting(t *testing.T) {
 	rep(t, r, b1, mspb.Lane_LANE_BROWSER, &mspb.Verdict{Status: "RUN", Stage: "js"})
 	b2 := pull1(t, r, mspb.Lane_LANE_BROWSER)
 	rep(t, r, b2, mspb.Lane_LANE_BROWSER, &mspb.Verdict{Status: "RUN", Stage: "js"})
-	if _, _, bdp, btp, rr := r.Snapshot(); bdp != 2 || btp != 2 || rr != 4 {
+	if _, _, bdp, btp, rr := snap5(r); bdp != 2 || btp != 2 || rr != 4 {
 		t.Fatalf("收口: browser=%d/%d rep=%d", bdp, btp, rr)
 	}
 }

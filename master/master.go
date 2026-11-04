@@ -83,6 +83,8 @@ type Round struct {
 	sites     map[int32]*siteState
 	responded int             // 已终结的站数
 	reports   int             // 累计有效回传次数（进度「所有任务」分子，含重试各计一次）
+	httpDone  int             // 爬取腿已响应（认账即了结，其后转升级/重试算新任务）
+	brDone    int             // 渲染腿已响应（同口径）
 	total     int             // 本轮站点总数
 	final     []*mspb.Verdict // 已响应队列：本轮终判集（MS_TASK §3），收口后供轮末写库
 	// 存指针不存值：protoimpl.MessageState 含 mutex，按值拷贝会踩 vet copylocks
@@ -296,8 +298,14 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 	}
 	s.leased = 0 // 认账即撤销在途租约
 	s.nonce = 0
-	// 已知站的有效回传：无论后续走终结/重试/升级，都计入进度「所有任务」分子。
+	// 已知站的有效回传：本腿该任务即告了结（其后终结/重试/升级都是另一条任务）。
+	// 腿响应与「所有任务」分子同点递增，故两腿响应相加=总响应、各自 ≤ 本腿派发。
 	r.reports++
+	if i == 0 {
+		r.httpDone++
+	} else {
+		r.brDone++
+	}
 
 	// IGNORE（工具链/站点超时）——只可能在 Browser 腿出现，回 Browser 队列重试 ≤5。
 	if v.GetInfraErr() != "" || v.GetNavTimeout() != "" {
@@ -402,19 +410,30 @@ func (r *Round) assignOrDoneLocked() mspb.Action {
 	return mspb.Action_ASSIGN
 }
 
-// Snapshot 供进度条读，两条腿各自「已派发 / 累计任务数」+ 累计回传。
-// 口径 = 需求原话：分子「已派出去」= 该腿累计派发；分母「累计任务」= 已派出去 + 还没派出去的（队列剩余）。
-// 升级/重试回灌会让分母随新增派发增长（重试也算一次派发），符合「本轮迄今产生过多少任务」。
-func (r *Round) Snapshot() (httpDisp, httpTotal, brDisp, brTotal, reports int) {
+// Progress 是主从进度条五行的一致快照（爬取派发/爬取响应/渲染派发/渲染响应/所有任务）。
+type Progress struct {
+	HTTPDisp, HTTPTotal                    int // 派发：分子=该腿累计已派发；分母=已派发+队列剩余（用户口径）
+	HTTPDone                               int // 响应：该腿已认账数；派发-响应=该腿在途（哈希表规模）
+	BrowserDisp, BrowserTotal, BrowserDone int
+	Reports                                int // 总响应 = HTTPDone + BrowserDone（「所有任务」分子）
+}
+
+// Snapshot 供进度条读。重试/升级回灌让分母随新增派发增长（一次派发算一个任务），
+// 所以「所有任务」分母可能大于首轮清单——这是设计口径。
+func (r *Round) Snapshot() Progress {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var p Progress
 	for _, s := range r.sites {
-		httpDisp += s.httpDisp
-		brDisp += s.brDisp
+		p.HTTPDisp += s.httpDisp
+		p.BrowserDisp += s.brDisp
 	}
-	httpTotal = httpDisp + len(r.queue[0])
-	brTotal = brDisp + len(r.queue[1])
-	return httpDisp, httpTotal, brDisp, brTotal, r.reports
+	p.HTTPTotal = p.HTTPDisp + len(r.queue[0])
+	p.BrowserTotal = p.BrowserDisp + len(r.queue[1])
+	p.HTTPDone = r.httpDone
+	p.BrowserDone = r.brDone
+	p.Reports = r.reports
+	return p
 }
 
 // Register 把一轮挂到 grpc 服务上，命令与测试共用同一份实现（D1 复用）。

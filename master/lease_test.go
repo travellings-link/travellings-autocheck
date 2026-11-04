@@ -45,7 +45,7 @@ func TestReclaimReturnsTaskToQueue(t *testing.T) {
 	// 窄窗回归锁：持有旧派发的“老 worker”迟到回传（同腿同站！）必须被丢弃。
 	_, _ = r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
 		Verdict: &mspb.Verdict{SiteId: 1, Nonce: old.GetNonce(), Status: "RUN"}})
-	if _, _, _, _, rp := r.Snapshot(); rp != 0 {
+	if _, _, _, _, rp := snap5(r); rp != 0 {
 		t.Fatalf("旧 nonce 的迟到回传必须丢弃, reports=%d", rp)
 	}
 	// 新持有者正常回传 → 认账终结、收口发哨兵。

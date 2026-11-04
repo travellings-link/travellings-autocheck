@@ -11,6 +11,7 @@ import (
 
 	"travellings-bot-go/crawl"
 	"travellings-bot-go/internal/ui"
+	"travellings-bot-go/master"
 	"travellings-bot-go/pipeline"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -83,7 +84,7 @@ func newProgress(total int, stats *pipeline.StageStats, verbose bool) *progressV
 // newMasterProgress 给 bot master 画三条队列进度（爬取队列/渲染队列/所有任务）。
 // snap = master.Round.Snapshot：两腿各自的「累计派发/累计任务数(已派+待派)」+ 累计回传。
 // 分母会随重试回灌增长——「所有任务 400/1600」这种分母远大于首轮清单是设计口径。
-func newMasterProgress(snap func() (hd, ht, bd, bt, rep int), verbose bool) *progressView {
+func newMasterProgress(snap func() master.Progress, verbose bool) *progressView {
 	p := &progressView{
 		w:       os.Stderr,
 		enabled: ui.UseColorStderr() && !verbose, // 只在 TTY 且非 -v：与 run 同一开关口径
@@ -91,12 +92,14 @@ func newMasterProgress(snap func() (hd, ht, bd, bt, rep int), verbose bool) *pro
 	}
 	p.bar = progress.New(progress.WithDefaultGradient())
 	p.frameFn = func(now time.Time) []string {
-		hd, ht, bd, bt, rep := snap()
+		s := snap()
 		return []string{
 			ui.ColorizeTo(os.Stderr, ui.Bold, "开往巡查 · 主从") + "  " + now.Sub(p.start).Round(time.Second).String(),
-			p.barLine("爬取队列", hd, ht, 8),
-			p.barLine("渲染队列", bd, bt, 8),
-			p.barLine("所有任务", rep, ht+bt, 8),
+			p.barLine("爬取派发", s.HTTPDisp, s.HTTPTotal, 8),
+			p.barLine("爬取响应", s.HTTPDone, s.HTTPTotal, 8),
+			p.barLine("渲染派发", s.BrowserDisp, s.BrowserTotal, 8),
+			p.barLine("渲染响应", s.BrowserDone, s.BrowserTotal, 8),
+			p.barLine("所有任务", s.Reports, s.HTTPTotal+s.BrowserTotal, 8),
 		}
 	}
 	return p
