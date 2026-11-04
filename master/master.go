@@ -8,6 +8,7 @@ package master
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -24,6 +25,11 @@ import (
 const (
 	retryTransient = 1 // 仅源于 HTTP 腿的 ERROR/TIMEOUT
 	retryIgnore    = 5 // 仅源于 Browser 腿的 IGNORE（工具链故障/站点超时，皆不写库）
+
+	// defaultPullMaxWait：空队列时 Pull 的最长挂起时间（开发组裁决：10 分钟）。
+	// 到点回空批，防中间设备掐断/静默断流把 worker 永久吊住；worker 收到空批立即再拉
+	// （新 Pull 又在 master 侧挂起），故无需任何轮询计时器。
+	defaultPullMaxWait = 10 * time.Minute
 )
 
 func laneIdx(l mspb.Lane) int {
@@ -48,6 +54,7 @@ type siteState struct {
 	name    string
 	leased  int8      // 当前在途腿：0=无、1=HTTP、2=Browser
 	leaseAt time.Time // 该腿被领走的时刻
+	nonce   uint64    // 当前派发凭据（per-dispatch token），随 Pull 下发
 }
 
 // Round 是一次巡查轮 master 的全部状态（MS_TASK §3 四结构），纯内存、轮末即焚（D4）。
@@ -61,6 +68,15 @@ type Round struct {
 	// 确保未接线的运行/测试行为零变化）。
 	leaseHTTP, leaseBrowser time.Duration
 	now                     func() time.Time // 时钟，测试可注入假时钟
+	pullMax                 time.Duration    // 空队列 Pull 的最长挂起
+	dispatchSeq             uint64           // per-dispatch 计数器（持锁递增）
+
+	// 惊群治理的唤醒原语（开发组裁决：挂起 Pull 而非让其轮询）。
+	wake            chan struct{} // 容量 1 的广播：队列有变化 / 收口
+	closedCh        chan struct{} // 收口瞬间关闭，唤醒全部挂起 Pull
+	closedAnnounced bool          // closedCh 只关一次
+
+	pulls atomic.Int64 // 累计 Pull RPC 次数：对照回归里量化「轮询风暴是否消掉」
 
 	mu        sync.Mutex
 	queue     [2][]*mspb.Task // 0=HTTP 待派发、1=Browser 待派发
@@ -71,8 +87,8 @@ type Round struct {
 	final     []*mspb.Verdict // 已响应队列：本轮终判集（MS_TASK §3），收口后供轮末写库
 	// 存指针不存值：protoimpl.MessageState 含 mutex，按值拷贝会踩 vet copylocks
 
-	onClose     func() // 收口回调（见 OnClose）
-	closedFired bool   // 回调只触发一次
+	onClose    func() // 收口回调（见 OnClose）
+	closeFired bool   // 回调只触发一次
 }
 
 // NewRound 建一轮：seed 灌入 HTTP 待派发队列（本轮清单，D13 只走 DB / M1 支持 --from-api）。
@@ -80,9 +96,12 @@ func NewRound(token string, seed []*mspb.Task, batch int) *Round {
 	q := make([]*mspb.Task, 0, len(seed)) // cap 预分配；用 len 会塞进 nil 任务（测试实测踩过）
 	r := &Round{
 		token: token, batch: batch,
-		sites: make(map[int32]*siteState),
-		final: make([]*mspb.Verdict, 0, len(seed)),
-		now:   time.Now,
+		sites:    make(map[int32]*siteState),
+		final:    make([]*mspb.Verdict, 0, len(seed)),
+		now:      time.Now,
+		pullMax:  defaultPullMaxWait,
+		wake:     make(chan struct{}, 1),
+		closedCh: make(chan struct{}),
 	}
 	for _, t := range seed {
 		if t == nil {
@@ -109,6 +128,17 @@ func (r *Round) SetLease(httpLease, browserLease time.Duration, now func() time.
 	}
 }
 
+// SetPullMaxWait 覆盖空队列 Pull 的挂起上限（mscmd 的 --pull-max-wait）；<=0 忽略。
+func (r *Round) SetPullMaxWait(d time.Duration) {
+	if d > 0 {
+		r.pullMax = d
+	}
+}
+
+// PullCount 返回累计 Pull RPC 次数。对照回归用它量化惊群：轮询时代次数≈站数×轮询频率，
+// 长挂时代只随「真正有活可派/收口」增长。
+func (r *Round) PullCount() int64 { return r.pulls.Load() }
+
 func (r *Round) checkToken(ctx context.Context) error {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -123,21 +153,48 @@ func (r *Round) checkToken(ctx context.Context) error {
 
 func (r *Round) closedLocked() bool { return r.responded >= r.total }
 
-// fireCloseLocked：首次观察到收口时异步触发 OnClose（不持锁执行回调，避免与
-// srv.Stop 死锁）。调用方须持锁。
-func (r *Round) fireCloseLocked() {
-	if r.closedLocked() && r.onClose != nil && !r.closedFired {
+// signalLocked 非阻塞广播「队列有变化」，唤醒挂起的 Pull。调用方须持锁。
+// 容量 1 + default 分支：多次入队合并成一次唤醒，唤醒后各 Pull 重查自己的腿，
+// 拿不到就再挂起——内部唤醒不是 RPC，不存在放大。
+func (r *Round) signalLocked() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// announceClosedLocked：首次观察到收口时关闭 closedCh 唤醒全部挂起 Pull（GracefulStop
+// 要等在途 RPC 结束，不唤醒就会死锁）。调用方须持锁。
+func (r *Round) announceClosedLocked() {
+	if !r.closedLocked() {
+		return
+	}
+	if !r.closedAnnounced {
+		r.closedAnnounced = true
+		close(r.closedCh)
+	}
+	if r.onClose != nil && !r.closeFired {
 		f := r.onClose
-		r.closedFired = true
+		r.closeFired = true
 		go f()
 	}
 }
 
+// enqueueLocked 把任务放回某腿待派队列并广播唤醒。调用方须持锁。
+func (r *Round) enqueueLocked(lane int, t *mspb.Task) {
+	r.queue[lane] = append(r.queue[lane], t)
+	r.signalLocked()
+}
+
 // Pull：worker 按腿领一批。
 //   - 已收口 → ROUND_DONE（D7，唯一退出信号）
-//   - 该腿队列暂空但未收口 → 空批 ASSIGN（有站仍在他处/待重试回灌），worker 等一拍重试。
-//     绝不把「队列空」当收口——那会丢在途站（M1 冒烟实测过）。
+//   - 该腿队列暂空但未收口 → **挂起**本次 Pull，直到有新任务回灌（唤醒回循环）、
+//     收口（→哨兵）、挂起上限 pullMax 到点（→空批）或 worker 侧取消。
+//     这就是惊群治理：把「worker 每秒轮询空队列」换成「master 有状态变化才回应」。
+//     空批只可能是 pullMax 超时，worker 收到后立即重拉（新 Pull 又挂起），零轮询计时器。
+//   - 绝不把「队列空」当收口——那会丢在途站（M1 冒烟实测过）。
 func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResponse, error) {
+	r.pulls.Add(1)
 	if err := r.checkToken(ctx); err != nil {
 		return nil, err
 	}
@@ -145,16 +202,40 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 	if i < 0 {
 		return nil, status.Error(codes.InvalidArgument, "lane 未指定")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closedLocked() {
-		return &mspb.PullResponse{Action: mspb.Action_ROUND_DONE}, nil
+
+	for {
+		r.mu.Lock()
+		if r.closedLocked() {
+			r.mu.Unlock()
+			return &mspb.PullResponse{Action: mspb.Action_ROUND_DONE}, nil
+		}
+		if len(r.queue[i]) > 0 {
+			out := r.assignLocked(i, int(req.GetWant()))
+			r.mu.Unlock()
+			return out, nil
+		}
+		maxWait := r.pullMax
+		r.mu.Unlock() // 挂起期间绝不持锁，否则 Report/Reclaim 全部堵死
+
+		timer := time.NewTimer(maxWait)
+		select {
+		case <-r.wake: // 队列变化：重查
+		case <-r.closedCh: // 收口：下一轮循环立即返回哨兵
+		case <-timer.C: // 挂起上限：回空批，worker 立即重拉（防静默断流永久吊住）
+			return &mspb.PullResponse{Action: mspb.Action_ASSIGN}, nil
+		case <-ctx.Done(): // worker 断开/进程退出：让 RPC 正常收尾
+			timer.Stop()
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+		timer.Stop()
 	}
+}
+
+// assignLocked 从第 i 腿队头派发至多 want 条，登记租约与 per-dispatch nonce。
+// 调用方须持锁。
+func (r *Round) assignLocked(i, want int) *mspb.PullResponse {
 	q := r.queue[i]
-	if len(q) == 0 {
-		return &mspb.PullResponse{Action: mspb.Action_ASSIGN}, nil
-	}
-	n := int(req.GetWant())
+	n := want
 	if n <= 0 {
 		n = 1
 	}
@@ -169,6 +250,8 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 	r.queue[i] = q[n:]
 	at := r.now()
 	for _, t := range out.Tasks {
+		r.dispatchSeq++
+		t.Nonce = r.dispatchSeq
 		if s := r.sites[t.GetId()]; s != nil {
 			if i == 0 {
 				s.httpDisp++
@@ -177,9 +260,10 @@ func (r *Round) Pull(ctx context.Context, req *mspb.PullRequest) (*mspb.PullResp
 			}
 			s.leased = int8(i + 1) // 登记租约：该站在途，超时由 Reclaim 回收
 			s.leaseAt = at
+			s.nonce = t.Nonce // 本次派发凭据；重派会覆盖，老 worker 的迟到因此失效
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Report：worker 逐条回传（提案口径：不等整批攒齐）。master 在此做路由/重试决策。
@@ -204,22 +288,21 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 		// 未知站：可能是回收后重复回传或注入。计数丢弃，不拖垮收口。
 		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
-	// 租约状态机防重复/防迟到：该站当前必须「就在这条腿在途」才认账。
-	// 覆盖 kill-worker 场景——被回收（leased=0）后老 worker 的迟到回传直接丢弃，
-	// 不会重复 responded。已知窄窗：回收并「同腿」重派后老 worker 才回传会误认，
-	// 需 per-dispatch token 才能彻底消除；本环境租约 >> 单请求预算，该窗口实际不发生。
-	// ponytail: 迟到去重的精确 token（proto attempt 回填）留待 M4c 全链路一并验证。
-	if s.leased != int8(i+1) {
+	// per-dispatch token：回传必须带「当前这次派发」的 nonce 且腿号匹配才认账。
+	// 彻底关掉此前唯一的残余窄窗——回收→同腿重派→老 worker 迟到回传：那轮回传的
+	// nonce 属于上一轮派发，与 s.nonce 不等即丢弃。迟到/重复/跨腿/注入统一这一条守卫。
+	if s.leased != int8(i+1) || v.GetNonce() == 0 || v.GetNonce() != s.nonce {
 		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
 	s.leased = 0 // 认账即撤销在途租约
+	s.nonce = 0
 	// 已知站的有效回传：无论后续走终结/重试/升级，都计入进度「所有任务」分子。
 	r.reports++
 
 	// IGNORE（工具链/站点超时）——只可能在 Browser 腿出现，回 Browser 队列重试 ≤5。
 	if v.GetInfraErr() != "" || v.GetNavTimeout() != "" {
 		if s.brDisp-1 < retryIgnore { // brDisp-1 = 已重试次数（首次不算重试）
-			r.queue[1] = append(r.queue[1], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
+			r.enqueueLocked(1, &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
 			return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 		}
 		r.responded++ // 预算耗尽：按 IGNORE 终结（M2 起不写库）
@@ -230,14 +313,14 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 	// 升级（SPA/非确定错误）：escalate=true 且尚未升级过 → 转 Browser 队列。
 	if v.GetEscalate() && !s.escalated {
 		s.escalated = true
-		r.queue[1] = append(r.queue[1], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
+		r.enqueueLocked(1, &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
 		return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 	}
 
 	// HTTP 腿提前断言的 ERROR/TIMEOUT → 回 HTTP 队列重试 ≤1。
 	if i == 0 && (v.GetStatus() == "ERROR" || v.GetStatus() == "TIMEOUT") {
 		if s.httpDisp-1 < retryTransient {
-			r.queue[0] = append(r.queue[0], &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
+			r.enqueueLocked(0, &mspb.Task{Id: v.GetSiteId(), Url: v.GetUrl(), Name: s.name})
 			return &mspb.ReportResponse{Action: r.assignOrDoneLocked()}, nil
 		}
 	}
@@ -250,7 +333,7 @@ func (r *Round) Report(ctx context.Context, req *mspb.ReportRequest) (*mspb.Repo
 
 // Reclaim 扫描在途租约，把「领走后超时未回传」的任务回收（提案承诺的哈希表兜底）。
 // 由 masterCmd 的后台 ticker 按小于最短租约的间隔驱动。返回本轮回收数。
-//   - 未超租约预算：回灌对应待派队列（等别的 worker 重领）；
+//   - 未超租约预算：回灌对应待派队列（唤醒挂起的 Pull，等别的 worker 重领）；
 //   - 超预算（worker 反复死）：按不写库终结（InfraErr 标记），防单站无限回收拖垮收口。
 func (r *Round) Reclaim(now time.Time) int {
 	r.mu.Lock()
@@ -269,6 +352,7 @@ func (r *Round) Reclaim(now time.Time) int {
 			continue
 		}
 		s.leased = 0
+		s.nonce = 0 // 作废本次派发凭据：老 worker 之后回传一律不认
 		s.recycles++
 		budget := retryTransient
 		if lane == 1 {
@@ -288,17 +372,18 @@ func (r *Round) Reclaim(now time.Time) int {
 			})
 			r.responded++
 		} else {
-			r.queue[lane] = append(r.queue[lane], &mspb.Task{Id: id, Url: s.url, Name: s.name})
+			r.enqueueLocked(lane, &mspb.Task{Id: id, Url: s.url, Name: s.name})
 		}
 		reclaimed++
 	}
 	if reclaimed > 0 {
-		r.fireCloseLocked() // 若因回收终结凑齐收口，触发轮末退出
+		r.announceClosedLocked() // 若因回收终结凑齐收口，唤醒挂起 Pull + 轮末退出
 	}
 	return reclaimed
 }
 
 // Verdicts 返回本轮终判快照（已响应队列）。收口后由轮末逻辑读取转写库。
+// 拷贝返回：调用方拿到的是不可变视图，不受后续 Report 影响。
 func (r *Round) Verdicts() []*mspb.Verdict {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -307,16 +392,19 @@ func (r *Round) Verdicts() []*mspb.Verdict {
 	return out
 }
 
-// assignOrDoneLocked：收口了就发哨兵，否则让 worker 继续拉。调用方持锁。
+// assignOrDoneLocked：收口了就发哨兵（并唤醒全部挂起 Pull），否则让 worker 继续拉。
+// 调用方须持锁。
 func (r *Round) assignOrDoneLocked() mspb.Action {
 	if r.closedLocked() {
-		r.fireCloseLocked()
+		r.announceClosedLocked()
 		return mspb.Action_ROUND_DONE
 	}
 	return mspb.Action_ASSIGN
 }
 
 // Snapshot 供进度条读，两条腿各自「已派发 / 累计任务数」+ 累计回传。
+// 口径 = 需求原话：分子「已派出去」= 该腿累计派发；分母「累计任务」= 已派出去 + 还没派出去的（队列剩余）。
+// 升级/重试回灌会让分母随新增派发增长（重试也算一次派发），符合「本轮迄今产生过多少任务」。
 func (r *Round) Snapshot() (httpDisp, httpTotal, brDisp, brTotal, reports int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

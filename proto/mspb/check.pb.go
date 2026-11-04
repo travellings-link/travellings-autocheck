@@ -129,6 +129,7 @@ type Task struct {
 	Url           string                 `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
 	Attempt       int32                  `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"` // 已渲染重试次数（仅 Browser 流用，master 侧计账）
 	Name          string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`        // 站点名（清单→worker→回传→报表/卡片展示，不参与判定）
+	Nonce         uint64                 `protobuf:"varint,5,opt,name=nonce,proto3" json:"nonce,omitempty"`     // per-dispatch token：每次派发唯一，Report 必须原样带回。
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -189,6 +190,13 @@ func (x *Task) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *Task) GetNonce() uint64 {
+	if x != nil {
+		return x.Nonce
+	}
+	return 0
 }
 
 // PullRequest：worker 上报自己的能力和想拉的数量（want=workers×1，D10 由 worker 推算）。
@@ -308,6 +316,7 @@ type Verdict struct {
 	InfraErr      string                 `protobuf:"bytes,7,opt,name=infra_err,json=infraErr,proto3" json:"infra_err,omitempty"`       // 非空=我方工具链故障，不写库
 	NavTimeout    string                 `protobuf:"bytes,8,opt,name=nav_timeout,json=navTimeout,proto3" json:"nav_timeout,omitempty"` // 非空=站点超时，不写库
 	Escalate      bool                   `protobuf:"varint,9,opt,name=escalate,proto3" json:"escalate,omitempty"`                      // HTTP 初审是否需渲染：路由权在 master（§4.3）
+	Nonce         uint64                 `protobuf:"varint,10,opt,name=nonce,proto3" json:"nonce,omitempty"`                           // 必须等于所领 Task.nonce；不匹配的迟到/重复回传 master 丢弃。
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -403,6 +412,13 @@ func (x *Verdict) GetEscalate() bool {
 		return x.Escalate
 	}
 	return false
+}
+
+func (x *Verdict) GetNonce() uint64 {
+	if x != nil {
+		return x.Nonce
+	}
+	return 0
 }
 
 type ReportRequest struct {
@@ -505,18 +521,19 @@ var File_check_proto protoreflect.FileDescriptor
 
 const file_check_proto_rawDesc = "" +
 	"\n" +
-	"\vcheck.proto\x12\x05ms.v1\"V\n" +
+	"\vcheck.proto\x12\x05ms.v1\"l\n" +
 	"\x04Task\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x05R\x02id\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x18\n" +
 	"\aattempt\x18\x03 \x01(\x05R\aattempt\x12\x12\n" +
-	"\x04name\x18\x04 \x01(\tR\x04name\"B\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x14\n" +
+	"\x05nonce\x18\x05 \x01(\x04R\x05nonce\"B\n" +
 	"\vPullRequest\x12\x1f\n" +
 	"\x04lane\x18\x01 \x01(\x0e2\v.ms.v1.LaneR\x04lane\x12\x12\n" +
 	"\x04want\x18\x02 \x01(\x05R\x04want\"X\n" +
 	"\fPullResponse\x12%\n" +
 	"\x06action\x18\x01 \x01(\x0e2\r.ms.v1.ActionR\x06action\x12!\n" +
-	"\x05tasks\x18\x02 \x03(\v2\v.ms.v1.TaskR\x05tasks\"\xec\x01\n" +
+	"\x05tasks\x18\x02 \x03(\v2\v.ms.v1.TaskR\x05tasks\"\x82\x02\n" +
 	"\aVerdict\x12\x17\n" +
 	"\asite_id\x18\x01 \x01(\x05R\x06siteId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x10\n" +
@@ -527,7 +544,9 @@ const file_check_proto_rawDesc = "" +
 	"\tinfra_err\x18\a \x01(\tR\binfraErr\x12\x1f\n" +
 	"\vnav_timeout\x18\b \x01(\tR\n" +
 	"navTimeout\x12\x1a\n" +
-	"\bescalate\x18\t \x01(\bR\bescalate\"Z\n" +
+	"\bescalate\x18\t \x01(\bR\bescalate\x12\x14\n" +
+	"\x05nonce\x18\n" +
+	" \x01(\x04R\x05nonce\"Z\n" +
 	"\rReportRequest\x12\x1f\n" +
 	"\x04lane\x18\x01 \x01(\x0e2\v.ms.v1.LaneR\x04lane\x12(\n" +
 	"\averdict\x18\x02 \x01(\v2\x0e.ms.v1.VerdictR\averdict\"7\n" +

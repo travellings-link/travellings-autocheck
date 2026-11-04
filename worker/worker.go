@@ -192,13 +192,10 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 				}
 				tasks := pr.GetTasks()
 				if len(tasks) == 0 {
-					// 队列暂空但未收口：活还捏在别的腿/worker 手里（M4a 租约回收兜底）。
-					// 等一拍再拉，绝不在此退出——退出信号只有哨兵（D7）。
-					select {
-					case <-time.After(time.Second):
-					case <-ctx.Done():
-						return
-					}
+					// 空批只可能是 master 侧 pullMax 挂起到点（活还捏在别的腿/worker 手里）。
+					// 立即重拉即可——新 Pull 又在 master 挂起，worker 侧**不需要任何轮询计时器**，
+					// 这就是惊群治理的落点（此前的 1s 空转轮询已删除）。
+					// 绝不在此退出：退出信号只有哨兵（D7）。
 					continue
 				}
 				inflight.Add(int64(len(tasks)))
@@ -252,6 +249,7 @@ func judgeHTTP(ctx context.Context, o Options, t *mspb.Task) *mspb.Verdict {
 		Stage:    string(check.Raw),
 		Evidence: res.Evidence,
 		Escalate: res.Escalate, // 交 master 决定是否入 Browser 队列（D14）
+		Nonce:    t.GetNonce(), // per-dispatch token 原样带回（迟到/重复回传的守卫凭据）
 	}
 }
 
@@ -265,7 +263,8 @@ func judgeBrowser(ctx context.Context, o Options, t *mspb.Task) *mspb.Verdict {
 	if settle <= 0 {
 		settle = 8 * time.Second
 	}
-	v := &mspb.Verdict{SiteId: t.GetId(), Name: t.GetName(), Url: t.GetUrl(), Stage: string(check.JS)}
+	v := &mspb.Verdict{SiteId: t.GetId(), Name: t.GetName(), Url: t.GetUrl(),
+		Stage: string(check.JS), Nonce: t.GetNonce()} // nonce 原样带回（迟到/重复守卫）
 	page, err := crawl.Rendered(ctx, o.CDPURL, t.GetUrl(), settle,
 		func(pp check.Page) bool { _, ok := check.MatchTravellings(pp); return ok })
 	if err != nil {

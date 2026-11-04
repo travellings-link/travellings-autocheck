@@ -37,12 +37,15 @@ func TestRoundWritesBackEnd(t *testing.T) {
 	})
 
 	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1", Name: "一号"}, {Id: 2, Url: "u2", Name: "二号"}}, 0)
-	r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 2})
-	// 1 号含入口判 RUN；2 号无入口判 LOST（带 evidence→写进 failedReason）。
-	r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
-		Verdict: &mspb.Verdict{SiteId: 1, Name: "一号", Url: "u1", Status: "RUN", Stage: "raw"}})
-	rr, _ := r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
-		Verdict: &mspb.Verdict{SiteId: 2, Name: "二号", Url: "u2", Status: "LOST", Stage: "raw", Evidence: "no entry"}})
+	// 逐条领→逐条回传（helper 自动携带 per-dispatch nonce）。
+	t1 := pull1(t, r, mspb.Lane_LANE_HTTP) // 1 号含入口判 RUN
+	if _, err := rep(t, r, t1, mspb.Lane_LANE_HTTP,
+		&mspb.Verdict{Url: "u1", Status: "RUN", Stage: "raw"}); err != nil {
+		t.Fatal(err)
+	}
+	t2 := pull1(t, r, mspb.Lane_LANE_HTTP) // 2 号无入口判 LOST（带 evidence→写进 failedReason）
+	rr, _ := rep(t, r, t2, mspb.Lane_LANE_HTTP,
+		&mspb.Verdict{Url: "u2", Status: "LOST", Stage: "raw", Evidence: "no entry"})
 	if rr.GetAction() != mspb.Action_ROUND_DONE {
 		t.Fatalf("两站齐了应收口, got %v", rr.GetAction())
 	}

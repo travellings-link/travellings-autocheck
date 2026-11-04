@@ -28,6 +28,7 @@ type masterConfig struct {
 	Listen, Token                               string
 	Driver, SQLitePath, DSN                     string
 	ReclaimHTTP, ReclaimBrowser                 time.Duration
+	PullMaxWait                                 time.Duration
 	RenderRetries, TimeoutMS, JSSettleMS, Limit int
 	Write, DryRun, FromAPI                      bool
 	MinPct                                      float64
@@ -133,6 +134,7 @@ func masterCmd() *cobra.Command {
 					time.Duration(1+c.RenderRetries) + 10*time.Second
 			}
 			round.SetLease(httpLease, brLease, nil)
+			round.SetPullMaxWait(c.PullMaxWait) // 0 → 内部默认 10m（惊群挂起上限）
 
 			// 三行进度（爬取/渲染/所有任务）复用 run 的同一组件；仅 TTY 且非 -v 生效。
 			prog := newMasterProgress(round.Snapshot, verbose)

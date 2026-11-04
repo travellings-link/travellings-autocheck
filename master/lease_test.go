@@ -13,57 +13,57 @@ func fixedClock() (func() time.Time, *time.Time) {
 	return func() time.Time { return *p }, p
 }
 
-// 租约回收：worker 领走不回传 → 超时回灌原腿队列，可被另一 worker 重领。
+// 租约回收：领走不回传 → 超时回灌原腿队列，可被另一 worker 重领；
+// 回收即作废 nonce——**同腿重派后老 worker 的迟到回传也被丢弃**（per-dispatch token
+// 关死的窄窗，此前只能靠「租约>>预算」概率论证，现在有回归锁）。
 func TestReclaimReturnsTaskToQueue(t *testing.T) {
 	now, cur := fixedClock()
 	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1", Name: "n1"}}, 1)
 	r.SetLease(30*time.Second, 30*time.Second, now)
-	if pr, _ := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1}); len(pr.GetTasks()) != 1 {
-		t.Fatal("领走 1 条")
-	}
-	// 未到租约：不回收。
+	r.SetPullMaxWait(50 * time.Millisecond) // 空腿时快速回空批，不挂 10 分钟
+	old := pull1(t, r, mspb.Lane_LANE_HTTP) // 第一次派发，记住其 nonce
 	if got := r.Reclaim(now().Add(10 * time.Second)); got != 0 {
 		t.Fatalf("未到期不该回收, got %d", got)
 	}
-	// 另一腿此刻领不到（HTTP 队列空、未收口→空批）。
-	if pr, _ := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1}); len(pr.GetTasks()) != 0 {
-		t.Fatal("回收前队列应为空")
+	// 空腿未收口：挂起到上限后回空批（惊群语义：不立即返回、也不永久吊住）。
+	st := time.Now()
+	pr, err := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+	if err != nil || len(pr.GetTasks()) != 0 {
+		t.Fatalf("空腿应挂起后回空批: err=%v n=%d", err, len(pr.GetTasks()))
+	}
+	if elapsed := time.Since(st); elapsed < 40*time.Millisecond {
+		t.Fatalf("空批回得太快（没挂起？），elapsed=%v", elapsed)
 	}
 	*cur = now().Add(31 * time.Second)
 	if got := r.Reclaim(*cur); got != 1 {
 		t.Fatalf("到期应回收 1 条, got %d", got)
 	}
-	pr, _ := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
-	if len(pr.GetTasks()) != 1 || pr.GetTasks()[0].GetName() != "n1" {
-		t.Fatalf("回收后应可重领且 name 保留, got %d", len(pr.GetTasks()))
+	fresh := pull1(t, r, mspb.Lane_LANE_HTTP) // 重派：新 nonce
+	if fresh.GetName() != "n1" || fresh.GetNonce() == old.GetNonce() {
+		t.Fatalf("重派应保留 name 且 nonce 更新, got name=%q nonce=%d/%d", fresh.GetName(), fresh.GetNonce(), old.GetNonce())
 	}
-	// 租约状态机保证不重复计数：重派后无论哪个 worker 先回传都消费租约(leased=0)，
-	// 之后任何迟到/重复回传（leased=0，不匹配在途腿）一律丢弃、不推进 reports/responded。
-	// 先让「当前持有者」正常回传终结这一站：
-	if _, err := r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
-		Verdict: &mspb.Verdict{SiteId: 1, Status: "RUN"}}); err != nil {
-		t.Fatalf("holder report: %v", err)
+	// 窄窗回归锁：持有旧派发的“老 worker”迟到回传（同腿同站！）必须被丢弃。
+	_, _ = r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
+		Verdict: &mspb.Verdict{SiteId: 1, Nonce: old.GetNonce(), Status: "RUN"}})
+	if _, _, _, _, rp := r.Snapshot(); rp != 0 {
+		t.Fatalf("旧 nonce 的迟到回传必须丢弃, reports=%d", rp)
 	}
-	_, _, _, _, repDone := r.Snapshot()
-	// 老 worker 的幽灵回传此刻 leased=0 → 必须丢弃（幂等保证，收口不被重复推高）。
-	if _, err := r.Report(tok("t"), &mspb.ReportRequest{Lane: mspb.Lane_LANE_HTTP,
-		Verdict: &mspb.Verdict{SiteId: 1, Status: "RUN"}}); err != nil {
-		t.Fatalf("ghost report: %v", err)
-	}
-	_, _, _, _, repAfter := r.Snapshot()
-	if repDone != repAfter {
-		t.Fatalf("终结后的重复/迟到回传不得计入 reports: %d→%d", repDone, repAfter)
+	// 新持有者正常回传 → 认账终结、收口发哨兵。
+	rr, _ := rep(t, r, fresh, mspb.Lane_LANE_HTTP, &mspb.Verdict{Status: "RUN"})
+	if rr.GetAction() != mspb.Action_ROUND_DONE {
+		t.Fatalf("新 nonce 应认账并收口, got %v", rr.GetAction())
 	}
 }
 
-// 回收预算耗尽：按不写库终结（InfraErr），保证本轮收口不被反复炸的 worker 卡死。
+// 回收预算耗尽：按不写库终结（InfraErr），保证收口不被反复炸的 worker 卡死。
 func TestReclaimBudgetTerminates(t *testing.T) {
 	now, cur := fixedClock()
 	r := NewRound("t", []*mspb.Task{{Id: 1, Url: "u1"}}, 1)
 	r.SetLease(10*time.Second, 10*time.Second, now)
+	r.SetPullMaxWait(30 * time.Millisecond) // 末轮 Pull 走超时空批路径也要快
 	// HTTP 腿预算 retryTransient=1 → 第 2 次回收（recycles=2>1）终结。
 	for i := 0; i < 2; i++ {
-		r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+		pull1(t, r, mspb.Lane_LANE_HTTP)
 		*cur = cur.Add(11 * time.Second)
 		r.Reclaim(*cur)
 	}
@@ -74,9 +74,13 @@ func TestReclaimBudgetTerminates(t *testing.T) {
 	if len(fs) != 1 || fs[0].GetInfraErr() == "" {
 		t.Fatalf("应产生带 InfraErr 的不写库终结, got %d 条", len(fs))
 	}
-	// 收口后 Pull 发哨兵。
+	// 收口后 Pull 立即发哨兵（不挂起——closedCh 已关）。
+	st := time.Now()
 	pr, _ := r.Pull(tok("t"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
 	if pr.GetAction() != mspb.Action_ROUND_DONE {
 		t.Fatalf("收口后应发哨兵, got %v", pr.GetAction())
+	}
+	if time.Since(st) > 20*time.Millisecond {
+		t.Fatal("收口后的 Pull 不该挂起")
 	}
 }

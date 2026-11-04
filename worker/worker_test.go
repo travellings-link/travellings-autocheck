@@ -19,12 +19,13 @@ import (
 	"travellings-bot-go/worker"
 )
 
-func seedRound(t *testing.T, batch int) (*grpc.ClientConn, func()) {
+func seedRound(t *testing.T, batch int) (*grpc.ClientConn, *master.Round, func()) {
 	t.Helper()
 	seed := []*mspb.Task{{Id: 1, Url: "https://a.example"}, {Id: 2, Url: "https://b.example"}}
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	master.Register(srv, master.NewRound("good-token", seed, batch))
+	round := master.NewRound("good-token", seed, batch)
+	master.Register(srv, round)
 	go func() { _ = srv.Serve(lis) }()
 	conn, err := worker.Dial(context.Background(), worker.Options{
 		Master: "passthrough:///bufnet",
@@ -34,17 +35,20 @@ func seedRound(t *testing.T, batch int) (*grpc.ClientConn, func()) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	return conn, func() { conn.Close(); srv.Stop() }
+	return conn, round, func() { conn.Close(); srv.Stop() }
 }
 
-// M1 验收①：好 token 领任务（batch=workers×1）；坏 token Unauthenticated；排空后哨兵。
+// M1 验收①（惊群语义更新版）：好 token 领任务（batch=workers×1）；坏 token 拒；
+// 空腿未收口的 Pull 必须挂起到 pullMax 才回空批（旧契约秒回空批才是逼轮询的根因）；
+// 回传须带 nonce；收口后 Pull 立即拿到哨兵（广播，不等 pullMax）。
 func TestHandshakeSentinelToken(t *testing.T) {
-	conn, stop := seedRound(t, 1) // batch 封顶 1 → 一次只给一条
+	conn, round, stop := seedRound(t, 1)
 	defer stop()
+	round.SetPullMaxWait(80 * time.Millisecond) // 否则空腿按生产默认挂满 10 分钟
 	ctx := context.Background()
 	cli := mspb.NewCheckClient(conn)
-	withTok := func(tok string) context.Context {
-		return metadata.AppendToOutgoingContext(ctx, "authorization", tok)
+	withTok := func(tk string) context.Context {
+		return metadata.AppendToOutgoingContext(ctx, "authorization", tk)
 	}
 
 	pr, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
@@ -54,16 +58,19 @@ func TestHandshakeSentinelToken(t *testing.T) {
 	if pr.GetAction() != mspb.Action_ASSIGN || len(pr.GetTasks()) != 1 {
 		t.Fatalf("want ASSIGN×1 (workers×1), got action=%v n=%d", pr.GetAction(), len(pr.GetTasks()))
 	}
+	task1 := pr.GetTasks()[0]
 
 	if _, err := cli.Pull(withTok("bad-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("bad token: want Unauthenticated, got %v (code=%v)", err, status.Code(err))
 	}
 
-	// 领尽队列（task2），制造「队列空但 2 条在途未收口」状态。
-	if p2, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1}); err != nil || len(p2.GetTasks()) != 1 {
+	p2, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
+	if err != nil || len(p2.GetTasks()) != 1 {
 		t.Fatalf("pull task2: err=%v n=%d", err, len(p2.GetTasks()))
 	}
-	// 队列暂空但未收口：必须回空批 ASSIGN、绝不发哨兵——冒烟抓到的语义 bug 回归锁。
+	task2 := p2.GetTasks()[0]
+
+	st := time.Now()
 	idle, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
 	if err != nil {
 		t.Fatalf("pull while inflight: %v", err)
@@ -71,21 +78,28 @@ func TestHandshakeSentinelToken(t *testing.T) {
 	if idle.GetAction() != mspb.Action_ASSIGN || len(idle.GetTasks()) != 0 {
 		t.Fatalf("want empty ASSIGN while inflight, got action=%v n=%d", idle.GetAction(), len(idle.GetTasks()))
 	}
-	// 未领完：把 2 条全部 Report 掉，收口 responded==total → 此后 Pull 必发哨兵
-	for i := 0; i < 2; i++ {
+	if held := time.Since(st); held < 60*time.Millisecond {
+		t.Fatalf("空腿 Pull 没挂起（elapsed=%v），惊群未消", held)
+	}
+
+	for _, task := range []*mspb.Task{task1, task2} {
 		if _, err := cli.Report(withTok("good-token"), &mspb.ReportRequest{
 			Lane:    mspb.Lane_LANE_HTTP,
-			Verdict: &mspb.Verdict{SiteId: int32(i + 1), Status: "RUN", Stage: "raw"},
+			Verdict: &mspb.Verdict{SiteId: task.GetId(), Nonce: task.GetNonce(), Status: "RUN", Stage: "raw"},
 		}); err != nil {
-			t.Fatalf("report %d: %v", i, err)
+			t.Fatalf("report: %v", err)
 		}
 	}
+	st2 := time.Now()
 	done, err := cli.Pull(withTok("good-token"), &mspb.PullRequest{Lane: mspb.Lane_LANE_HTTP, Want: 1})
 	if err != nil {
 		t.Fatalf("pull after close: %v", err)
 	}
 	if done.GetAction() != mspb.Action_ROUND_DONE {
 		t.Fatalf("want ROUND_DONE sentinel, got %v", done.GetAction())
+	}
+	if time.Since(st2) > 50*time.Millisecond {
+		t.Fatal("收口后的 Pull 应被广播立即唤醒，不该等 pullMax")
 	}
 }
 

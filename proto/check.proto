@@ -25,7 +25,9 @@ message Task {
   int32 id = 1;
   string url = 2;
   int32 attempt = 3; // 已渲染重试次数（仅 Browser 流用，master 侧计账）
-  string name = 4;  // 站点名（清单→worker→回传→报表/卡片展示，不参与判定）
+  string name = 4;   // 站点名（清单→worker→回传→报表/卡片展示，不参与判定）
+  uint64 nonce = 5;  // per-dispatch token：每次派发唯一，Report 必须原样带回。
+                    // 彻底消除「回收→同腿重派→老 worker 迟到误认」窄窗。
 }
 
 // PullRequest：worker 上报自己的能力和想拉的数量（want=workers×1，D10 由 worker 推算）。
@@ -50,6 +52,7 @@ message Verdict {
   string infra_err = 7;    // 非空=我方工具链故障，不写库
   string nav_timeout = 8;  // 非空=站点超时，不写库
   bool escalate = 9;       // HTTP 初审是否需渲染：路由权在 master（§4.3）
+  uint64 nonce = 10;       // 必须等于所领 Task.nonce；不匹配的迟到/重复回传 master 丢弃。
 }
 
 message ReportRequest {
