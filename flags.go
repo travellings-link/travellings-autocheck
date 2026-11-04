@@ -38,7 +38,7 @@ func addMasterFlags(cmd *cobra.Command, c *masterConfig) {
 	f.StringVar(&c.SQLitePath, "sqlite", "", "sqlite 文件")
 	f.StringVar(&c.DSN, "dsn", "", "mysql DSN")
 	f.DurationVar(&c.ReclaimHTTP, "reclaim-http", 0, "HTTP 租约超时回收；0=--timeout×3（D11）")
-	f.DurationVar(&c.ReclaimBrowser, "reclaim-browser", 0, "Browser 租约超时回收；0=按 js-settle+timeout 推算（D11）")
+	f.DurationVar(&c.ReclaimBrowser, "reclaim-browser", 0, "Browser 租约超时回收；0=(js-settle+75s)×(1+render-retries)+15s（D11）")
 
 	f.IntVar(&c.RenderRetries, "render-retries", 2, "渲染重试预算（决策权在 master）")
 	f.IntVar(&c.HTTPRetries, "http-retries", 1, "HTTP 腿 ERROR/TIMEOUT 重派预算（D15）；0=完全对齐单机（基准测试用）")

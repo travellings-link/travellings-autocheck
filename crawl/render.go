@@ -27,6 +27,17 @@ import (
 // 一旦超过这个值，说明对端已经不回包，继续等只会把整轮巡查钉死。
 const setupTimeout = 20 * time.Second
 
+// BrowserTaskBudget 返回 crawl.Rendered 处理**单个任务**的最坏内部预算：
+//
+//	建页 10s + 初始设置 20s + 导航 settle+35s + 关页/收尾 ~10s = settle + 75s
+//
+// master 的 Browser 租约必须以此为依据——旧公式把单机「worker 本地重试预算」
+// （×(1+render-retries)）错误继承进来，且未覆盖建页/关页段，默认参数下
+// （settle 8s）租约只有 79s < 最坏预算 83s，慢站必被误回收（树莓派实测
+// reclaimed=1 每 30/60s 一次即此）。D14 铁律后 worker 从不本地重试，乘数本就无主。
+// 改参数时请同步 Rendered 内各 WithTimeout 行（createCtx/setupCtx/navCtx）。
+func BrowserTaskBudget(settle time.Duration) time.Duration { return settle + 75*time.Second }
+
 // forceCloseTab 兜底关闭标签页，补 chromedp 关闭路径的两处静默失败。
 //
 // chromedp 的 Cancel 只做两件事，且两处都可能静默放弃：

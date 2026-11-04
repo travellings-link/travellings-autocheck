@@ -120,17 +120,19 @@ func masterCmd() *cobra.Command {
 			round := master.NewRound(c.Token, tasks, 0)
 			t0 := time.Now()
 
-			// 租约（D11，按腿公式，flag 可覆盖）：HTTP = timeout×3；
-			// Browser = (js-settle + timeout)×(1+render-retries) + 10s 缓冲。
-			// 租约 >> worker 单任务预算是设计前提：正常慢不会误回收。
+			// 租约（D11，flag 可覆盖）。设计前提「租约 > worker 单任务预算」必须成立：
+			// HTTP = timeout×3；Browser = crawl.BrowserTaskBudget(settle)×(1+重试) + 15s 缓冲。
+			// 旧公式 (js-settle+timeout)×(1+retries)+10s 两头错：×retries 是单机本地重试
+			// 时代的遗留（D14 后不存在），且没覆盖建页/setup/关页段——默认参数下
+			// 79s < 最坏任务 83s，慢站必被误回收（树莓派实测）。重试预算内的站要连续
+			// 多次满预算渲染，所以乘 (1+RenderRetries) 而非只保单次。
 			httpLease := c.ReclaimHTTP
 			if httpLease <= 0 {
 				httpLease = time.Duration(c.TimeoutMS) * 3 * time.Millisecond
 			}
 			brLease := c.ReclaimBrowser
 			if brLease <= 0 {
-				brLease = time.Duration(c.JSSettleMS+c.TimeoutMS)*time.Millisecond*
-					time.Duration(1+c.RenderRetries) + 10*time.Second
+				brLease = browserLease(c.JSSettleMS, c.RenderRetries)
 			}
 			round.SetLease(httpLease, brLease, nil)
 			round.SetHTTPRetries(c.HTTPRetries) // 0 → HTTP 腿零重试，与 bot run 语义逐条等价（基准）
@@ -292,6 +294,16 @@ func workerCmd() *cobra.Command {
 	}
 	addWorkerFlags(cmd, &c)
 	return cmd
+}
+
+// browserLease 是 D11 的 Browser 租约默认公式：必须覆盖「连续 (1+重试) 次满预算
+// 渲染 + 调度间隙」——crawl.BrowserTaskBudget 是 Rendered 的单任务最坏内部预算
+// （建页 10+setup 20+导航 settle+35+关页 ~10）。树莓派实测旧公式（未覆盖建页关页段、
+// 乘数是 D14 后已不存在的本地重试）导致慢站被周期性误回收，勿再往短改；
+// 要动先动 crawl 侧预算并让 lease_test 的不变量红给你看。
+func browserLease(jsSettleMS, renderRetries int) time.Duration {
+	return crawl.BrowserTaskBudget(time.Duration(jsSettleMS)*time.Millisecond)*
+		time.Duration(1+renderRetries) + 15*time.Second
 }
 
 // notifyFeishuMaster 与 bot run 的 notify 闭包同语义：webhook 未配置静默跳过，
