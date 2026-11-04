@@ -22,7 +22,15 @@ import (
 	"travellings-bot-go/check"
 	"travellings-bot-go/crawl"
 	mspb "travellings-bot-go/proto/mspb"
+
+	"github.com/rs/zerolog"
 )
+
+// pkglog 由 SetLogger 注入；未注入时静默（与 pipeline/crawl/feishu/report 同款约定）。
+var pkglog = zerolog.Nop()
+
+// SetLogger 让调用方把配置好的 logger 传进来，逐条回传的 Debug 才落对出口。
+func SetLogger(l zerolog.Logger) { pkglog = l }
 
 // Options 是 worker 拉流参数（对齐 MS_TASK §6 命令面）。
 type Options struct {
@@ -132,6 +140,7 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 					if ctx.Err() != nil {
 						return // D7：见哨兵/中断后丢弃在途，不回传（master 按租约/重派处理）
 					}
+					tStart := time.Now()
 					var vr *mspb.Verdict
 					if ln == mspb.Lane_LANE_HTTP {
 						vr = judgeHTTP(ctx, o, t)
@@ -142,6 +151,12 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 						inflight.Add(-1)
 						return
 					}
+					// 完成一个回传一个（提案口径）：不等整批攒齐。长连接上单条 RPC
+					// 没有握手开销，早回一条 master 就能早一步路由/收口。
+					pkglog.Debug().Int32("id", t.GetId()).Str("lane", ln.String()).
+						Str("verdict", vr.GetStatus()).Int("attempt", int(t.GetAttempt())).
+						Str("took", time.Since(tStart).Round(time.Millisecond).String()).
+						Msg("回传单站结果")
 					rr, err := cli.Report(withToken(ctx, o.Token), &mspb.ReportRequest{Lane: ln, Verdict: vr})
 					if err != nil {
 						if ctx.Err() == nil {

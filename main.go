@@ -19,6 +19,7 @@ import (
 	"travellings-bot-go/internal/report"
 	"travellings-bot-go/internal/ui"
 	"travellings-bot-go/pipeline"
+	"travellings-bot-go/worker"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/rs/zerolog"
@@ -195,6 +196,7 @@ func setupLog(verbose bool) *zerolog.Logger {
 	crawl.SetLogger(l)    // crawl 包（CDP 回退等告警）也走同一出口
 	feishu.SetLogger(l)   // 跳过通知的 Debug 也走同一出口
 	report.SetLogger(l)   // 轮末闸门/写回的日志（RUN 占比、已写回）也走同一出口
+	worker.SetLogger(l)   // worker 模式：逐条回传的 Debug 走同一出口（-v 可见每条 RPC）
 
 	// 接管标准库 log：net/http 等库在内部直接 log.Printf 写 os.Stderr
 	// （如 transport.go 的 "Unsolicited response received on idle HTTP channel"），
