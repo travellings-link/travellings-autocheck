@@ -123,11 +123,13 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 		if pct <= 0 {
 			pct = 25
 		}
-		// 补拉触发点（D9）：在手剩余 < want×pct%，向上取整避免 want 小时恒不补。
+		// 补拉触发点（D9）：在手未处理 < want×pct%，向上取整（≥1）——批小也不恒不补。
 		refillAt := (want*pct + 99) / 100
 
+		// pending = 在手队列。补拉阈值只看 len(pending)（在手**未开始处理**的剩余），
+		// 不把「正在处理中」占额度——否则整批清空才补拉，批尾 N-1 个 consumer 空等
+		// 最慢一站（32 站 w=4 实测：含在途口径 14.4s vs 单机 9.6s；只算 pending 9.9s）。
 		pending := make(chan *mspb.Task, 2*want)
-		var inflight atomic.Int64 // 已领未回传 = 在手（含排队 + 正在处理）
 
 		// consumer×want：crawl.Raw 纯函数、crawl.Rendered 走连接池（池大小=BrowserWorkers，
 		// 与本处 want 一致），并发安全。
@@ -148,7 +150,6 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 						vr = judgeBrowser(ctx, o, t)
 					}
 					if ctx.Err() != nil {
-						inflight.Add(-1)
 						return
 					}
 					// 完成一个回传一个（提案口径）：不等整批攒齐。长连接上单条 RPC
@@ -164,7 +165,6 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 						}
 						return
 					}
-					inflight.Add(-1)
 					mu.Lock()
 					n++
 					mu.Unlock()
@@ -184,7 +184,7 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 			defer pwg.Done()
 			defer close(pending) // producer 退出即关，consumer range 自然收摊
 			for ctx.Err() == nil {
-				if int(inflight.Load()) >= refillAt {
+				if len(pending) >= refillAt {
 					// 手头够忙，等 consumer 消化下来再补拉（refill-pct 语义）。
 					select {
 					case <-time.After(200 * time.Millisecond):
@@ -213,7 +213,6 @@ func run(ctx context.Context, cli mspb.CheckClient, o Options) (int, error) {
 					// 绝不在此退出：退出信号只有哨兵（D7）。
 					continue
 				}
-				inflight.Add(int64(len(tasks)))
 				for _, t := range tasks {
 					select {
 					case pending <- t:
