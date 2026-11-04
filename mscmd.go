@@ -192,6 +192,10 @@ func masterCmd() *cobra.Command {
 			err = srv.Serve(lis)
 			stopProg()
 			elapsed := time.Since(t0)
+			// 惊群量化：轮询时代此数 ≈ 站数×轮询频率（worker 空转也在拉）；
+			// 长挂后只随「真有活可派 / 收口 / pullMax 到点」增长，运维据此确认风暴已消。
+			log.Info().Int64("pulls", round.PullCount()).Int("tasks", len(tasks)).
+				Msg("本轮 Pull 次数")
 
 			// 收口判定：Serve 返回后仍齐判 = 正常轮末；不齐只可能是 ^C 中断，
 			// 按既有契约「中断轮不写库」（D12：master 无内部 deadline，进程级交 systemd）。
