@@ -311,58 +311,56 @@ journalctl -u autocheck.service -u obscura.service
 
 ## 主从部署（master / worker 拉模式）
 
-单机 \`bot run\` 之外，可把巡查算力拆到多台机器：\`bot master\` 只在轮末开一个短进程
+单机 `bot run` 之外，可把巡查算力拆到多台机器：`bot master` 只在轮末开一个短进程
 （timer 调起，D2），维护 HTTP/Browser 两条待派发队列 + 已派发哈希表 + 已响应队列（纯内存、轮末即焚）；
-\`bot worker\` 主动连 master **拉**任务、逐条回传——master 不追 worker 死活，NAT 后无妨，
+`bot worker` 主动连 master **拉**任务、逐条回传——master 不追 worker 死活，NAT 后无妨，
 天然背压与负载均衡。worker 绝不原地重试/升级：一切结果回 master 重分配。
 
 三个必踩的坑，先说死：
 
-1. **集群里必须至少有一台带 \`--browser-workers\` 的 worker。** SPA 站 HTTP 初审判 LOST 后会
+1. **集群里必须至少有一台带 `--browser-workers` 的 worker。** SPA 站 HTTP 初审判 LOST 后会
    escalate 进 Browser 队列等渲染；纯 HTTP 集群遇到一个 SPA 站就永远凑不齐收口条件，
-   本轮挂到 systemd \`TimeoutStartSec\` 才作废。
-2. **worker unit 千万别设 \`TimeoutStartSec\`。** worker 起来先无限重试等 master 上线（D8），
+   本轮挂到 systemd `TimeoutStartSec` 才作废。
+2. **worker unit 千万别设 `TimeoutStartSec`。** worker 起来先无限重试等 master 上线（D8），
    被 systemd 掐死就永远连不上（deploy/ms-worker.service 里有注释）。
-3. **master 端口对 worker 可达，v1 只有 token 没有 TLS。** \`--token\` 两侧必须一致，
-   master 只应在内网/隧道监听；token 泄露 = 可领任务也可灌假判定，按 DB 凭据同级保管。
 
-\`/etc/ms-master.env\`（DB 凭据只在 master 侧）：
+`/etc/ms-master.env`（DB 凭据只在 master 侧）：
 
-\`\`\`ini
+```ini
 DB_DRIVER=mysql
 DB_DSN=user:pass@tcp(127.0.0.1:3306)/dbname
 MS_TOKEN=换成长随机串            # master --token 与所有 worker --token 用同一个
 FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx  # 可选，通知仍只在 master 轮末发
-\`\`\`
+```
 
-unit 文件在 \`deploy/\`：\`ms-cdp.service\`（worker 机的 CDP 后端）+\`ms-master.service/.timer\`
-（timer 调起、跑完即退，\`TimeoutStartSec\` 兜底 = D12「进程级时限交 systemd」）+
-\`ms-worker.service/.timer\`。master 机：
+unit 文件在 `deploy/`：`ms-cdp.service`（worker 机的 CDP 后端）+`ms-master.service/.timer`
+（timer 调起、跑完即退，`TimeoutStartSec` 兜底 = D12「进程级时限交 systemd」）+
+`ms-worker.service/.timer`。master 机：
 
-\`\`\`sh
+```sh
 systemctl daemon-reload
 systemctl enable --now ms-master.timer
-\`\`\`
+```
 
 每台 worker 机（有 Chrome/Obscura 的那台给 --browser-workers）：
 
-\`\`\`sh
+```sh
 bot worker --master ms.internal:9500 --token "$MS_TOKEN" \
      --http-workers 20 --browser-workers 4 --cdp-url ws://127.0.0.1:9222/devtools/browser
-\`\`\`
+```
 
-参数口径：拉取批次 = 对应 \`--http-workers\`/\`--browser-workers\`（workers×1，无需在 master 指定）；
-在手剩余 < 批次×\`--refill-pct\`%（默认 25）自动补拉；worker 炸掉未回传的任务按租约超时
-自动回队重派（HTTP \`--timeout\`×3、Browser 按 js-settle+timeout 推算，\`--reclaim-http/--reclaim-browser\`
+参数口径：拉取批次 = 对应 `--http-workers`/`--browser-workers`（workers×1，无需在 master 指定）；
+在手剩余 < 批次×`--refill-pct`%（默认 25）自动补拉；worker 炸掉未回传的任务按租约超时
+自动回队重派（HTTP `--timeout`×3、Browser 按 js-settle+timeout 推算，`--reclaim-http/--reclaim-browser`
 可覆盖），反复炸超预算则按不写库终结，轮照样收口。判定语汇、写库契约（WAIT 不变量、
-RUN 占比闸门、\`InfraErr/NavTimeout\` 不写库）与单机逐条一致。
+RUN 占比闸门、`InfraErr/NavTimeout` 不写库）与单机逐条一致。
 
 **对照回归**（上线前必跑一次）：主从与单机对同一份清单应产出逐站一致的判定。
-固化成脚本 \`deploy/regress.sh\`（起 master→等就绪→放一台 both worker→等收口→单机重跑→逐站 diff）：
+固化成脚本 `deploy/regress.sh`（起 master→等就绪→放一台 both worker→等收口→单机重跑→逐站 diff）：
 
-\`\`\`sh
+```sh
 MS_TOKEN=xxx BOT=./bot ./deploy/regress.sh 50
-\`\`\`
+```
 
 依赖：能访问 api.travellings.cn（\`--from-api\` 免配 DB）、有可回退的无头 Chrome、jq。
 脚本里 worker 特意带 \`--browser-workers 4\`——纯 HTTP worker 会让 SPA 站 escalate 后永不收口
