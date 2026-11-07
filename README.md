@@ -1,5 +1,5 @@
 # 🚆Travellings Autocheck
-_**WIP | 自动化批量巡查工具**_
+_**开往自动化批量巡查工具**_
 
 部分替代原先的 [travellings-link/travellings-bot](https://github.com/travellings-link/travellings-bot)，高性能的自动化巡查工具
 
