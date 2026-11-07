@@ -1,0 +1,69 @@
+name: 我的站点被误报
+description: 站点被巡查判成异常（LOST / TIMEOUT / ERROR 等），但实际不是
+title: "[误报] "
+labels: ["假性结果"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        谢谢反馈。只填你手上有的信息即可，不需要跑巡查工具、也不需要贴日志。
+        请确认页面上确实有指向 `https://www.travellings.cn/go.html` 的开往入口链接。
+
+  - type: input
+    id: site
+    attributes:
+      label: 站点地址
+      description: 被误报的站点首页完整 URL
+      placeholder: https://example.com
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reported
+    attributes:
+      label: 被报成了什么
+      description: 你在状态页上看到的判定；不确定就选「不确定」
+      options:
+        - 不确定
+        - LOST（找不到开往入口）
+        - TIMEOUT（超时）
+        - ERROR（证书 / 连接错误）
+        - HTTP 状态码（如 403）
+        - WAIT（人工手动暂停）
+        - RUN（正常）
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 实际情况 / 你期望的判定
+      description: 一句话说明，例如「首页有开往链接，应判为 RUN」「SPA 站点，入口由 JS 渲染」
+      placeholder: 页面正常，底部有开往链接，期望判为 RUN
+    validations:
+      required: true
+
+  - type: input
+    id: entry
+    attributes:
+      label: 开往入口实际所在位置（选填）
+      description: 若入口不在首页，或由 JS 动态挂载，请给出具体页面 / 说明
+      placeholder: 例如 /about.html，或「首页 JS 加载后才出现」
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息（选填）
+      description: 复现时间、CDN / 防火墙 / 地区限制等任何有助于排查的线索
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认站点上存在指向开往的入口链接，且近 30 天内可正常访问
+          required: true
